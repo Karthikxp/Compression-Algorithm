@@ -1,0 +1,76 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Models
+models/*.pt
+models/*.pth
+models/*.onnx
+!models/.gitkeep
+
+# Output files
+*.hevc
+*.h265
+*.mp4
+*.mkv
+compressed/
+output/
+visualizations/
+demo_visualizations/
+
+# Test images (except samples)
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.tiff
+!examples/*.jpg
+!examples/*.png
+
+# Temporary files
+*.tmp
+*.qpm
+temp/
+tmp/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+

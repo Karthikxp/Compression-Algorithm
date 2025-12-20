@@ -1,0 +1,33 @@
+# Core Deep Learning & Computer Vision
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.24.0
+opencv-python>=4.8.0
+opencv-contrib-python>=4.8.0
+
+# Object Detection (YOLO)
+ultralytics>=8.0.0
+
+# Saliency Detection
+gdown>=4.7.0  # For downloading pretrained models
+scikit-image>=0.21.0
+
+# Semantic Segmentation
+timm>=0.9.0  # For model architectures
+albumentations>=1.3.0  # For image augmentations
+
+# Image Processing
+Pillow>=10.0.0
+imageio>=2.31.0
+
+# Video/Image Encoding Support
+ffmpeg-python>=0.2.0
+
+# Utilities
+tqdm>=4.65.0
+matplotlib>=3.7.0
+scipy>=1.11.0
+
+# Optional: For advanced visualization
+seaborn>=0.12.0
+
