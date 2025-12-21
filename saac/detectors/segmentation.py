@@ -7,6 +7,12 @@ These regions can be aggressively compressed.
 import numpy as np
 import cv2
 from typing import Dict, List, Optional
+try:
+    import torch
+    import torchvision
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
 
 
 class SemanticSegmentor:
@@ -36,23 +42,45 @@ class SemanticSegmentor:
         self.method = method
         self.device = device
         self.model = None
+        self.deeplabv3_classes = []
         
         if method == 'deeplabv3':
-            self._load_deeplabv3()
+            if not TORCH_AVAILABLE:
+                print("  Warning: PyTorch not available. Falling back to simple method.")
+                self.method = 'simple'
+            else:
+                self._load_deeplabv3()
         
         print(f"✓ SemanticSegmentor initialized with method '{method}' on {device}")
     
     def _load_deeplabv3(self):
-        """Load DeepLabV3 model (placeholder for full implementation)."""
+        """Load DeepLabV3 model for advanced semantic segmentation."""
         try:
-            import torchvision
-            print("  Loading DeepLabV3 model...")
-            # In production, load pretrained model
-            # self.model = torchvision.models.segmentation.deeplabv3_resnet50(pretrained=True)
-            print("  Warning: DeepLabV3 not fully implemented. Using simple method as fallback.")
+            import torch
+            import torchvision.models.segmentation as segmentation
+            
+            print("  Loading DeepLabV3-ResNet50 model...")
+            
+            # Load pretrained DeepLabV3 with ResNet50 backbone
+            self.model = segmentation.deeplabv3_resnet50(weights='DEFAULT')
+            self.model = self.model.to(self.device)
+            self.model.eval()
+            
+            # DeepLabV3 trained on PASCAL VOC (21 classes)
+            self.deeplabv3_classes = [
+                'background', 'aeroplane', 'bicycle', 'bird', 'boat', 'bottle',
+                'bus', 'car', 'cat', 'chair', 'cow', 'diningtable', 'dog',
+                'horse', 'motorbike', 'person', 'pottedplant', 'sheep', 'sofa',
+                'train', 'tvmonitor'
+            ]
+            
+            print("  ✓ DeepLabV3 model loaded successfully (21 classes)")
+            
         except Exception as e:
             print(f"  Warning: Could not load DeepLabV3: {e}")
+            print("  Falling back to simple method.")
             self.method = 'simple'
+            self.model = None
     
     def segment(self, image: np.ndarray) -> Dict[str, np.ndarray]:
         """
@@ -229,8 +257,96 @@ class SemanticSegmentor:
         return priority_mask
     
     def _deeplabv3_segmentation(self, image: np.ndarray) -> Dict[str, np.ndarray]:
-        """DeepLabV3 segmentation (placeholder)."""
-        # In full implementation, run DeepLabV3 model
-        # For now, fallback to simple method
-        return self._simple_segmentation(image)
+        """
+        DeepLabV3 semantic segmentation with 21 PASCAL VOC classes.
+        Maps to our compression categories.
+        """
+        if self.model is None:
+            return self._simple_segmentation(image)
+        
+        import torch
+        import torchvision.transforms as T
+        
+        h, w = image.shape[:2]
+        
+        # Preprocess image
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        
+        # DeepLabV3 preprocessing
+        preprocess = T.Compose([
+            T.ToPILImage(),
+            T.Resize((520, 520)),  # Standard size for DeepLabV3
+            T.ToTensor(),
+            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+        
+        input_tensor = preprocess(image_rgb).unsqueeze(0).to(self.device)
+        
+        # Run inference
+        with torch.no_grad():
+            output = self.model(input_tensor)['out'][0]
+        
+        # Get predictions (H, W) with class indices
+        predictions = output.argmax(0).cpu().numpy()
+        
+        # Resize back to original size
+        predictions = cv2.resize(predictions.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
+        
+        # Map DeepLabV3 classes to our semantic categories
+        masks = self._map_deeplabv3_to_categories(predictions, h, w)
+        
+        return masks
+    
+    def _map_deeplabv3_to_categories(self, predictions: np.ndarray, h: int, w: int) -> Dict[str, np.ndarray]:
+        """
+        Map DeepLabV3's 21 PASCAL VOC classes to our 6 compression categories.
+        """
+        masks = {
+            'sky': np.zeros((h, w), dtype=np.uint8),
+            'water': np.zeros((h, w), dtype=np.uint8),
+            'road': np.zeros((h, w), dtype=np.uint8),
+            'vegetation': np.zeros((h, w), dtype=np.uint8),
+            'building': np.zeros((h, w), dtype=np.uint8),
+            'unknown': np.zeros((h, w), dtype=np.uint8)
+        }
+        
+        # DeepLabV3 doesn't have explicit sky/water/road classes
+        # We use position heuristics + class info
+        
+        # Sky detection (top region that's "background")
+        top_region = predictions[:int(h * 0.5), :]
+        masks['sky'][top_region == 0] = 1  # Class 0 = background (often sky)
+        
+        # Vegetation: pottedplant (16)
+        masks['vegetation'][predictions == 16] = 1
+        
+        # Building-related: chair (9), diningtable (11), sofa (18), tvmonitor (20)
+        # These are indoor objects, suggesting building interior
+        for cls_idx in [9, 11, 18, 20]:
+            masks['building'][predictions == cls_idx] = 1
+        
+        # Vehicles suggest roads nearby: car (7), bus (6), motorbike (14), bicycle (2)
+        for cls_idx in [2, 6, 7, 14]:
+            # Expand slightly to capture road beneath vehicles
+            vehicle_mask = (predictions == cls_idx).astype(np.uint8)
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (30, 30))
+            expanded = cv2.dilate(vehicle_mask, kernel, iterations=1)
+            # Only mark bottom region as road
+            bottom_region_mask = np.zeros((h, w), dtype=np.uint8)
+            bottom_region_mask[int(h * 0.5):, :] = 1
+            masks['road'][expanded & bottom_region_mask > 0] = 1
+        
+        # Water detection (background in bottom region, not road)
+        bottom_bg = predictions[int(h * 0.5):, :] == 0
+        masks['water'][int(h * 0.5):, :] = bottom_bg.astype(np.uint8)
+        
+        # Remove water where road was detected
+        masks['water'][masks['road'] > 0] = 0
+        
+        # Unknown: everything else
+        all_known = (masks['sky'] | masks['water'] | masks['road'] | 
+                    masks['vegetation'] | masks['building'])
+        masks['unknown'] = (~all_known.astype(bool)).astype(np.uint8)
+        
+        return masks
 

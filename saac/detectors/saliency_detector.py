@@ -40,16 +40,40 @@ class SaliencyDetector:
     def _load_u2net(self):
         """Load U2-Net model for high-quality saliency detection."""
         try:
-            # Try to load U2-Net model (simplified version)
-            # In production, you'd download pretrained weights
             print("  Loading U2-Net model...")
-            # Placeholder - in real implementation, load pretrained weights
-            self.u2net_model = None  # Would load actual model here
-            print("  Warning: U2-Net model not fully implemented. Using spectral method as fallback.")
+            
+            # Download and load pretrained U2-Net model
+            import torch.hub
+            import os
+            
+            # Create models directory
+            models_dir = 'models'
+            os.makedirs(models_dir, exist_ok=True)
+            
+            # Load U2-Net from torch hub or local
+            model_path = os.path.join(models_dir, 'u2net.pth')
+            
+            if os.path.exists(model_path):
+                print("  Loading U2-Net from local cache...")
+                self.u2net_model = self._build_u2net()
+                self.u2net_model.load_state_dict(torch.load(model_path, map_location=self.device))
+            else:
+                print("  Downloading U2-Net pretrained weights (176 MB)...")
+                # Download from official repo
+                self.u2net_model = torch.hub.load('xuebinqin/U-2-Net', 'u2net', pretrained=True)
+                # Save for future use
+                torch.save(self.u2net_model.state_dict(), model_path)
+                print("  Model cached for future use")
+            
+            self.u2net_model = self.u2net_model.to(self.device)
+            self.u2net_model.eval()
+            print("  ✓ U2-Net model loaded successfully")
+            
         except Exception as e:
             print(f"  Warning: Could not load U2-Net: {e}")
             print("  Falling back to spectral method.")
             self.method = 'spectral'
+            self.u2net_model = None
     
     def detect(self, image: np.ndarray) -> np.ndarray:
         """
@@ -126,14 +150,52 @@ class SaliencyDetector:
     def _u2net_saliency(self, image: np.ndarray) -> np.ndarray:
         """
         Deep learning-based saliency using U2-Net.
-        Placeholder for full implementation.
+        Produces high-quality saliency maps with precise object boundaries.
         """
-        # In a full implementation, this would:
-        # 1. Preprocess image
-        # 2. Run through U2-Net model
-        # 3. Post-process output
-        # For now, fallback to spectral method
-        return self._spectral_residual(image)
+        if self.u2net_model is None:
+            return self._spectral_residual(image)
+        
+        # Preprocess image for U2-Net (expects RGB, 320x320)
+        h, w = image.shape[:2]
+        
+        # Convert BGR to RGB
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        
+        # Resize to 320x320 for U2-Net
+        image_resized = cv2.resize(image_rgb, (320, 320))
+        
+        # Normalize to [0, 1] and convert to tensor
+        image_tensor = torch.from_numpy(image_resized.transpose(2, 0, 1)).float() / 255.0
+        image_tensor = image_tensor.unsqueeze(0).to(self.device)
+        
+        # Run inference
+        with torch.no_grad():
+            # U2-Net returns multiple outputs, take the first one (finest scale)
+            outputs = self.u2net_model(image_tensor)
+            if isinstance(outputs, tuple):
+                saliency_pred = outputs[0]
+            else:
+                saliency_pred = outputs
+        
+        # Post-process: resize back to original size
+        saliency_map = saliency_pred.squeeze().cpu().numpy()
+        saliency_map = cv2.resize(saliency_map, (w, h))
+        
+        # Normalize to [0, 1]
+        saliency_map = (saliency_map - saliency_map.min()) / (saliency_map.max() - saliency_map.min() + 1e-8)
+        
+        return saliency_map
+    
+    def _build_u2net(self):
+        """Build U2-Net architecture (if loading from local weights)."""
+        # This is a simplified placeholder - actual U2-Net architecture is complex
+        # In practice, use torch.hub.load or download the official implementation
+        try:
+            import torch.hub
+            model = torch.hub.load('xuebinqin/U-2-Net', 'u2net', pretrained=False)
+            return model
+        except:
+            return None
     
     def detect_with_threshold(self, image: np.ndarray, threshold: float = 0.5) -> np.ndarray:
         """
