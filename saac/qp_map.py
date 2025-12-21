@@ -1,67 +1,72 @@
 """
-Quantization Parameter (QP) Map Generator
-Combines all detection layers to create a unified compression map.
+QP Map Generator
+Combines scene intent, prominence, and saliency for smart compression.
 """
 
 import numpy as np
 import cv2
-from typing import Dict, Optional
+from typing import Dict, Optional, List, Tuple
+
+from .intent_rules import IntentRuleEngine
+from .detectors.prominence import ProminenceCalculator
 
 
 class QPMapGenerator:
     """
-    Generates QP (Quantization Parameter) maps for HEVC encoding.
-    Lower QP = higher quality, Higher QP = more compression.
+    Generates QP (Quantization Parameter) maps using intelligent weight calculation.
     
-    QP Range for HEVC: 0-51
-    - 0-18: Visually lossless
-    - 18-28: High quality
-    - 28-40: Medium quality
-    - 40-51: Low quality (aggressive compression)
+    New Flow:
+    1. Scene intent provides base weights
+    2. Prominence boosts important objects
+    3. Saliency fills in the gaps
+    4. Semantic segmentation adjusts background
     """
     
     def __init__(self,
-                 person_qp: int = 10,
-                 saliency_qp: int = 25,
-                 background_qp: int = 51,
+                 base_qp: int = 51,
+                 high_quality_qp: int = 10,
+                 mid_quality_qp: int = 30,
                  blend_mode: str = 'priority'):
         """
-        Initialize QP map generator.
+        Initialize intelligent QP map generator.
         
         Args:
-            person_qp: QP for detected people/objects (default: 10, near lossless)
-            saliency_qp: QP for salient regions (default: 25, high quality)
-            background_qp: QP for background regions (default: 51, max compression)
+            base_qp: QP for unimportant regions (default: 51, max compression)
+            high_quality_qp: QP for critical regions (default: 10, near lossless)
+            mid_quality_qp: QP for moderately important regions (default: 30)
             blend_mode: 'priority' (take minimum QP) or 'weighted' (blend QPs)
         """
-        self.person_qp = person_qp
-        self.saliency_qp = saliency_qp
-        self.background_qp = background_qp
+        self.base_qp = base_qp
+        self.high_quality_qp = high_quality_qp
+        self.mid_quality_qp = mid_quality_qp
         self.blend_mode = blend_mode
         
-        # Validate QP values
-        for qp_val, name in [(person_qp, 'person_qp'), 
-                             (saliency_qp, 'saliency_qp'),
-                             (background_qp, 'background_qp')]:
-            if not 0 <= qp_val <= 51:
-                raise ValueError(f"{name} must be in range [0, 51], got {qp_val}")
+        # Initialize sub-components
+        self.intent_engine = IntentRuleEngine()
+        self.prominence_calc = ProminenceCalculator(
+            size_threshold=0.15,  # 15% of image
+            center_radius=0.3,    # 30% from center
+            prominence_boost=1.0
+        )
         
         print(f"✓ QPMapGenerator initialized")
-        print(f"  Person QP: {person_qp}, Saliency QP: {saliency_qp}, Background QP: {background_qp}")
+        print(f"  QP range: {high_quality_qp} (best) to {base_qp} (most compressed)")
     
     def generate(self,
                  image_shape: tuple,
-                 object_mask: Optional[np.ndarray] = None,
+                 scene: str,
+                 detections: List[Dict],
                  saliency_map: Optional[np.ndarray] = None,
                  segmentation_masks: Optional[Dict[str, np.ndarray]] = None) -> np.ndarray:
         """
-        Generate QP map by combining all detection layers.
+        Generate intelligent QP map using the new flow.
         
         Args:
-            image_shape: (H, W) or (H, W, C) of the original image
-            object_mask: Binary mask from object detection (0 or 1)
-            saliency_map: Saliency map with values in [0, 1]
-            segmentation_masks: Dictionary of semantic segmentation masks
+            image_shape: (H, W) or (H, W, C)
+            scene: Scene category (e.g., 'restaurant', 'landscape')
+            detections: List of detection dicts with 'bbox', 'mask', 'class_name', etc.
+            saliency_map: Optional saliency map [0, 1]
+            segmentation_masks: Optional semantic segmentation masks
             
         Returns:
             QP map (H, W) with values in [0, 51]
@@ -71,169 +76,159 @@ class QPMapGenerator:
         else:
             h, w = image_shape
         
-        # Start with background QP everywhere
-        qp_map = np.full((h, w), self.background_qp, dtype=np.float32)
+        print(f"\n  Scene detected: {scene}")
+        print(f"  {self.intent_engine.INTENT_PROFILES[scene]['description']}")
         
-        # Layer 3: Semantic segmentation (if available)
-        if segmentation_masks is not None:
-            qp_map = self._apply_segmentation(qp_map, segmentation_masks)
+        # Step 1: Set scene intent
+        self.intent_engine.set_scene(scene)
         
-        # Layer 2: Visual saliency (if available)
+        # Step 2: Calculate prominence for all detections
+        detections = self.prominence_calc.calculate_batch_prominence(detections, (h, w))
+        
+        # Step 3: Build weight map from detections
+        weight_map = self._build_weight_map(detections, (h, w))
+        
+        # Step 4: Apply saliency (fills gaps)
         if saliency_map is not None:
-            qp_map = self._apply_saliency(qp_map, saliency_map)
+            weight_map = self._apply_saliency(weight_map, saliency_map)
         
-        # Layer 1: Object detection (highest priority - if available)
-        if object_mask is not None:
-            qp_map = self._apply_objects(qp_map, object_mask)
+        # Step 5: Apply semantic segmentation (background adjustment)
+        if segmentation_masks is not None:
+            weight_map = self._apply_segmentation(weight_map, segmentation_masks)
         
-        # Apply smoothing for better visual quality at boundaries
+        # Step 6: Convert weights to QP values
+        qp_map = self._weights_to_qp(weight_map)
+        
+        # Step 7: Smooth transitions
         qp_map = self._smooth_qp_map(qp_map)
         
-        # Ensure valid range and convert to int
+        # Ensure valid range
         qp_map = np.clip(qp_map, 0, 51).astype(np.uint8)
         
         return qp_map
     
-    def _apply_segmentation(self, qp_map: np.ndarray, 
+    def _build_weight_map(self, detections: List[Dict], image_shape: Tuple[int, int]) -> np.ndarray:
+        """
+        Build weight map from detections using intent rules + prominence.
+        
+        Weight Map: 1.0 = maximum quality, 0.0 = maximum compression
+        """
+        h, w = image_shape
+        weight_map = np.zeros((h, w), dtype=np.float32)
+        
+        print(f"  Processing {len(detections)} detections...")
+        
+        for det in detections:
+            # Get base weight from intent rules
+            base_weight = self.intent_engine.get_weight_for_class(
+                class_id=det.get('class'),
+                class_name=det.get('class_name')
+            )
+            
+            # Apply prominence boost
+            prominence = det.get('prominence', {})
+            final_weight = self.prominence_calc.apply_prominence_weights(
+                base_weight, prominence
+            )
+            
+            # Log prominent objects
+            if prominence.get('is_prominent', False):
+                print(f"    ⭐ {det.get('class_name', 'object')}: "
+                      f"weight {base_weight:.2f} → {final_weight:.2f} "
+                      f"(prominent: {prominence.get('prominence_score', 0):.2f})")
+            
+            # Apply weight to mask or bbox
+            if det.get('mask') is not None:
+                # Use pixel-perfect segmentation mask
+                mask = det['mask']
+                if self.blend_mode == 'priority':
+                    # Take maximum weight (best quality)
+                    weight_map = np.maximum(weight_map, mask.astype(np.float32) * final_weight)
+                else:
+                    # Weighted blend
+                    weight_map += mask.astype(np.float32) * final_weight
+            else:
+                # Fallback to bounding box
+                x1, y1, x2, y2 = det['bbox']
+                if self.blend_mode == 'priority':
+                    weight_map[y1:y2, x1:x2] = np.maximum(
+                        weight_map[y1:y2, x1:x2], final_weight
+                    )
+                else:
+                    weight_map[y1:y2, x1:x2] += final_weight
+        
+        # Normalize if using weighted blend
+        if self.blend_mode == 'weighted':
+            weight_map = np.clip(weight_map, 0, 1)
+        
+        return weight_map
+    
+    def _apply_saliency(self, weight_map: np.ndarray, saliency_map: np.ndarray) -> np.ndarray:
+        """Apply saliency to fill in gaps between detected objects."""
+        # Saliency contributes where objects haven't been detected
+        # Scale saliency contribution: 0.6x for moderate boost
+        saliency_weight = saliency_map * 0.6
+        
+        if self.blend_mode == 'priority':
+            # Take maximum
+            weight_map = np.maximum(weight_map, saliency_weight)
+        else:
+            # Blend with existing weights
+            weight_map = 0.7 * weight_map + 0.3 * saliency_weight
+            weight_map = np.clip(weight_map, 0, 1)
+        
+        return weight_map
+    
+    def _apply_segmentation(self, weight_map: np.ndarray, 
                            segmentation_masks: Dict[str, np.ndarray]) -> np.ndarray:
-        """Apply semantic segmentation to QP map."""
-        # QP values for different semantic categories
-        semantic_qps = {
-            'sky': 48,        # Very high compression for sky
-            'water': 45,      # High compression for water
-            'road': 42,       # High compression for roads
-            'vegetation': 38, # Moderate-high compression for vegetation
-            'building': 35,   # Moderate compression for buildings
-            'unknown': self.background_qp
+        """Adjust background regions based on semantic segmentation."""
+        # Background categories get reduced weight
+        background_penalties = {
+            'sky': 0.1,        # Very low importance
+            'water': 0.15,
+            'road': 0.2,
+            'vegetation': 0.25,
+            'building': 0.3,
+            'unknown': 0.0
         }
         
         for category, mask in segmentation_masks.items():
-            if category in semantic_qps:
-                qp = semantic_qps[category]
-                if self.blend_mode == 'priority':
-                    # Take minimum QP (higher quality)
-                    qp_map[mask > 0] = np.minimum(qp_map[mask > 0], qp)
-                else:
-                    # Weighted blend
-                    qp_map[mask > 0] = (qp_map[mask > 0] + qp) / 2
+            if category in background_penalties:
+                penalty_weight = background_penalties[category]
+                # Only reduce weight where it's currently low (background regions)
+                background_mask = (weight_map < 0.3) & (mask > 0)
+                weight_map[background_mask] = penalty_weight
         
-        return qp_map
+        return weight_map
     
-    def _apply_saliency(self, qp_map: np.ndarray, saliency_map: np.ndarray) -> np.ndarray:
-        """Apply visual saliency to QP map."""
-        # Map saliency [0, 1] to QP range
-        # High saliency (1.0) -> saliency_qp (high quality)
-        # Low saliency (0.0) -> background_qp (low quality)
-        saliency_qp_map = self.background_qp - (self.background_qp - self.saliency_qp) * saliency_map
+    def _weights_to_qp(self, weight_map: np.ndarray) -> np.ndarray:
+        """
+        Convert weight map (0-1) to QP map (0-51).
         
-        if self.blend_mode == 'priority':
-            # Take minimum QP where saliency is significant
-            qp_map = np.minimum(qp_map, saliency_qp_map)
-        else:
-            # Weighted blend based on saliency strength
-            weight = saliency_map
-            qp_map = qp_map * (1 - weight) + saliency_qp_map * weight
-        
-        return qp_map
-    
-    def _apply_objects(self, qp_map: np.ndarray, object_mask: np.ndarray) -> np.ndarray:
-        """Apply object detection to QP map (highest priority)."""
-        # Objects always get the highest quality (lowest QP)
-        qp_map[object_mask > 0] = self.person_qp
-        return qp_map
+        Weight 1.0 → QP 10 (best quality)
+        Weight 0.0 → QP 51 (most compression)
+        """
+        # Linear mapping: QP = base_qp - (base_qp - high_quality_qp) * weight
+        qp_map = self.base_qp - (self.base_qp - self.high_quality_qp) * weight_map
+        return qp_map.astype(np.float32)
     
     def _smooth_qp_map(self, qp_map: np.ndarray, kernel_size: int = 15) -> np.ndarray:
-        """
-        Smooth QP map to avoid harsh transitions.
-        Harsh transitions can create visible artifacts at boundaries.
-        """
-        # Apply Gaussian blur for smooth transitions
+        """Smooth QP map to avoid harsh transitions."""
         smoothed = cv2.GaussianBlur(qp_map, (kernel_size, kernel_size), 0)
         return smoothed
     
-    def downsample_to_macroblocks(self, qp_map: np.ndarray, 
-                                  macroblock_size: int = 16) -> np.ndarray:
-        """
-        Downsample QP map to macroblock resolution.
-        HEVC operates on macroblocks (typically 16x16 or 32x32 pixels).
-        
-        Args:
-            qp_map: Full resolution QP map (H, W)
-            macroblock_size: Size of macroblocks (default: 16)
-            
-        Returns:
-            Downsampled QP map (H//macroblock_size, W//macroblock_size)
-        """
-        h, w = qp_map.shape
-        mb_h = h // macroblock_size
-        mb_w = w // macroblock_size
-        
-        # Resize to macroblock resolution using area interpolation (averaging)
-        mb_qp_map = cv2.resize(qp_map.astype(np.float32), 
-                               (mb_w, mb_h), 
-                               interpolation=cv2.INTER_AREA)
-        
-        # For each macroblock, take the MINIMUM QP (highest quality)
-        # This ensures important regions are not accidentally over-compressed
-        mb_qp_map_min = np.zeros((mb_h, mb_w), dtype=np.float32)
-        
-        for i in range(mb_h):
-            for j in range(mb_w):
-                y1, y2 = i * macroblock_size, min((i+1) * macroblock_size, h)
-                x1, x2 = j * macroblock_size, min((j+1) * macroblock_size, w)
-                mb_qp_map_min[i, j] = np.min(qp_map[y1:y2, x1:x2])
-        
-        return mb_qp_map_min.astype(np.uint8)
-    
-    def save_qp_map(self, qp_map: np.ndarray, output_path: str, 
-                    macroblock_size: int = 16):
-        """
-        Save QP map in format suitable for FFmpeg.
-        
-        Args:
-            qp_map: Full or macroblock resolution QP map
-            output_path: Path to save the QP map file
-            macroblock_size: Macroblock size (for downsampling if needed)
-        """
-        # Check if already at macroblock resolution
-        h, w = qp_map.shape
-        
-        # If map is large, downsample to macroblock resolution
-        if h > 500 or w > 500:  # Likely full resolution
-            mb_qp_map = self.downsample_to_macroblocks(qp_map, macroblock_size)
-        else:
-            mb_qp_map = qp_map
-        
-        # Save as raw binary file (int8 format for FFmpeg)
-        mb_qp_map.astype(np.int8).tofile(output_path)
-        
-        print(f"  QP map saved: {output_path} (shape: {mb_qp_map.shape})")
-    
     def visualize_qp_map(self, qp_map: np.ndarray) -> np.ndarray:
-        """
-        Create a colorized visualization of the QP map.
-        
-        Args:
-            qp_map: QP map (H, W)
-            
-        Returns:
-            Colored visualization (H, W, 3) in BGR format
-        """
-        # Normalize to [0, 255]
+        """Create colorized visualization of QP map."""
+        # Normalize to [0, 255] (invert so high quality = bright)
         normalized = ((51 - qp_map) / 51 * 255).astype(np.uint8)
         
-        # Apply colormap (RAINBOW: red=high quality, blue=low quality)
+        # Apply colormap (JET: red=high quality, blue=low quality)
         colored = cv2.applyColorMap(normalized, cv2.COLORMAP_JET)
         
         return colored
     
     def get_statistics(self, qp_map: np.ndarray) -> Dict[str, float]:
-        """
-        Get statistics about the QP map.
-        
-        Returns:
-            Dictionary with mean, min, max, and quality distribution
-        """
+        """Get statistics about the QP map."""
         stats = {
             'mean_qp': float(np.mean(qp_map)),
             'min_qp': int(np.min(qp_map)),

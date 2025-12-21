@@ -20,57 +20,64 @@ wheels/
 .installed.cfg
 *.egg
 
-# Virtual environments
+# Virtual Environment
 venv/
 env/
 ENV/
-.venv
 
-# IDEs
+# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+.DS_Store
 
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# Models
-models/*.pt
+# Model weights (download on demand)
 models/*.pth
-models/*.onnx
-!models/.gitkeep
+models/*.pt
+!yolov8n-seg.pt
 
-# Output files
+# Test outputs (generated during testing)
 *.hevc
 *.h265
 *.mp4
-*.mkv
-compressed/
-output/
-visualizations/
-demo_visualizations/
+*_compressed.*
+*_saac.*
+*_intelligent.*
+*_hybrid.*
+*_deep.*
+*_minimal.*
 
-# Test images (except samples)
+# Test images (add your own)
+test_images/
 *.jpg
-*.jpeg
 *.png
-*.bmp
-*.tiff
-!examples/*.jpg
-!examples/*.png
+*.jpeg
+!examples/demo_input.jpg
+
+# Visualizations (generated on demand)
+visualizations/
+output/
 
 # Temporary files
 *.tmp
-*.qpm
-temp/
-tmp/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs
 *.log
+.cache/
+temp*/
 
+# Jupyter
+.ipynb_checkpoints/
+
+# pytest
+.pytest_cache/
+
+# Coverage
+htmlcov/
+.coverage
+.coverage.*
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+dmypy.json

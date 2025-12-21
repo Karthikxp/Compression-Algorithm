@@ -1,100 +1,113 @@
 """
-Main SAAC Compressor
-Integrates all detection layers and encoding to perform saliency-aware compression.
+SAAC Compressor
+Scene-aware compression with intent classification and prominence-based weighting.
+
+Flow:
+1. Scene Classification → Intent Rules
+2. YOLOv8-seg → Pixel-perfect masks
+3. Prominence Check → Size + Location boosts
+4. Weight Calculation → Intent + Prominence
+5. Saliency → Fill gaps
+6. Segmentation → Background adjustment
+7. Adaptive Quantization → HEVC encoding
 """
 
 import numpy as np
 import cv2
 import os
 import time
-from typing import Optional, Dict, Tuple
-import tempfile
+from typing import Optional, Dict, List
 
-from .detectors import ObjectDetector, SaliencyDetector, SemanticSegmentor
+from .detectors import ObjectDetector, SaliencyDetector, SemanticSegmentor, SceneClassifier
 from .qp_map import QPMapGenerator
 from .encoder import HEVCEncoder
 
 
 class SaacCompressor:
     """
-    Saliency-Aware Adaptive Compression (SAAC) main class.
+    Saliency-Aware Adaptive Compression (SAAC).
     
-    Combines object detection, saliency detection, and semantic segmentation
-    to create a variable-quality compression map, then encodes using HEVC.
+    Features:
+    - Scene-aware intent classification
+    - Prominence-based object boosting
+    - Pixel-perfect segmentation masks
     """
     
     def __init__(self,
                  device: str = 'cpu',
-                 yolo_model: str = 'yolov8n.pt',
+                 yolo_model: str = 'yolov8n-seg.pt',
                  saliency_method: str = 'spectral',
                  segmentation_method: str = 'simple',
-                 person_quality: int = 10,
-                 saliency_quality: int = 25,
-                 background_quality: int = 51,
+                 scene_method: str = 'simple',
                  enable_saliency: bool = True,
                  enable_segmentation: bool = True,
                  blend_mode: str = 'priority'):
         """
-        Initialize the SAAC compressor.
+        Initialize the intelligent SAAC compressor.
         
         Args:
             device: 'cuda' or 'cpu'
-            yolo_model: YOLO model name (e.g., 'yolov8n.pt' for nano)
+            yolo_model: YOLO model ('yolov8n-seg.pt' for segmentation)
             saliency_method: 'spectral', 'fine_grained', or 'u2net'
             segmentation_method: 'simple' or 'deeplabv3'
-            person_quality: QP for people/objects (0-51, lower=better, default: 10)
-            saliency_quality: QP for salient regions (default: 25)
-            background_quality: QP for background (default: 51)
-            enable_saliency: Enable saliency detection layer
-            enable_segmentation: Enable segmentation layer
+            scene_method: 'simple', 'efficientnet', or 'resnet'
+            enable_saliency: Enable saliency detection
+            enable_segmentation: Enable semantic segmentation
             blend_mode: 'priority' or 'weighted'
         """
         print("="*60)
-        print("Initializing SAAC (Saliency-Aware Adaptive Compression)")
+        print("Initializing SAAC")
+        print("Scene-Aware + Prominence-Based Compression")
         print("="*60)
         
         self.device = device
         self.enable_saliency = enable_saliency
         self.enable_segmentation = enable_segmentation
         
-        # Initialize detectors
-        print("\n[1/4] Loading Object Detector...")
+        # Initialize components in order
+        print("\n[1/5] Loading Scene Classifier...")
+        self.scene_classifier = SceneClassifier(
+            method=scene_method,
+            device=device
+        )
+        
+        print("\n[2/5] Loading Object Detector (Segmentation)...")
         self.object_detector = ObjectDetector(
             model_name=yolo_model,
             device=device
         )
         
         if enable_saliency:
-            print("\n[2/4] Loading Saliency Detector...")
+            print("\n[3/5] Loading Saliency Detector...")
             self.saliency_detector = SaliencyDetector(
                 method=saliency_method,
                 device=device
             )
         else:
             self.saliency_detector = None
-            print("\n[2/4] Saliency detection disabled")
+            print("\n[3/5] Saliency detection disabled")
         
         if enable_segmentation:
-            print("\n[3/4] Loading Semantic Segmentor...")
+            print("\n[4/5] Loading Semantic Segmentor...")
             self.segmentor = SemanticSegmentor(
                 method=segmentation_method,
                 device=device
             )
         else:
             self.segmentor = None
-            print("\n[3/4] Semantic segmentation disabled")
+            print("\n[4/5] Semantic segmentation disabled")
         
-        print("\n[4/4] Initializing QP Map Generator and Encoder...")
+        print("\n[5/5] Initializing QP Generator and Encoder...")
         self.qp_generator = QPMapGenerator(
-            person_qp=person_quality,
-            saliency_qp=saliency_quality,
-            background_qp=background_quality,
+            base_qp=51,
+            high_quality_qp=10,
+            mid_quality_qp=30,
             blend_mode=blend_mode
         )
         
         self.encoder = HEVCEncoder()
         
-        # Statistics from last compression
+        # Statistics
         self.last_stats = {}
         
         print("\n" + "="*60)
@@ -107,13 +120,13 @@ class SaacCompressor:
                       save_visualizations: bool = False,
                       visualization_dir: Optional[str] = None) -> Dict[str, any]:
         """
-        Compress a single image using SAAC.
+        Compress image using SAAC.
         
         Args:
             input_path: Path to input image
             output_path: Path to output compressed file
             save_visualizations: Save intermediate visualizations
-            visualization_dir: Directory for visualizations (default: same as output)
+            visualization_dir: Directory for visualizations
             
         Returns:
             Dictionary with compression statistics
@@ -125,7 +138,7 @@ class SaacCompressor:
         start_time = time.time()
         
         # Load image
-        print("\n[Step 1/6] Loading image...")
+        print("\n[Step 1/7] Loading image...")
         image = cv2.imread(input_path)
         if image is None:
             raise ValueError(f"Could not load image: {input_path}")
@@ -133,70 +146,73 @@ class SaacCompressor:
         h, w = image.shape[:2]
         print(f"  Resolution: {w}x{h}")
         
-        # Check if dimensions need padding for HEVC encoding
+        # Check if dimensions need padding
         needs_padding = (h % 2 != 0) or (w % 2 != 0)
         temp_padded_path = None
         
         if needs_padding:
-            # Calculate padded dimensions (make even)
             new_h = h + (h % 2)
             new_w = w + (w % 2)
             print(f"  Note: Padding to {new_w}x{new_h} for HEVC compatibility")
             
-            # Pad the image
             padded_image = cv2.copyMakeBorder(
-                image, 
-                0, new_h - h,  # top, bottom
-                0, new_w - w,  # left, right
+                image, 0, new_h - h, 0, new_w - w,
                 cv2.BORDER_REPLICATE
             )
             
-            # Save temporary padded image
+            import tempfile
             temp_padded_path = tempfile.mktemp(suffix='.png')
             cv2.imwrite(temp_padded_path, padded_image)
             encoding_input_path = temp_padded_path
         else:
             encoding_input_path = input_path
         
-        # Detect objects (Layer 1: Must-Have)
-        print("\n[Step 2/6] Detecting objects (people, vehicles, etc.)...")
-        object_mask = self.object_detector.detect_with_expansion(
+        # Step 1: Scene Classification
+        print("\n[Step 2/7] Classifying scene...")
+        scene, scene_confidence = self.scene_classifier.classify(image)
+        scene_desc = self.scene_classifier.get_scene_description(scene)
+        print(f"  Scene: {scene} (confidence: {scene_confidence:.2f})")
+        print(f"  → {scene_desc}")
+        
+        # Step 2: Object Detection with Segmentation
+        print("\n[Step 3/7] Detecting objects with segmentation masks...")
+        detections = self.object_detector.detect_with_masks(
             image, 
-            confidence_threshold=0.25,
-            expansion_percent=15.0
+            confidence_threshold=0.25
         )
-        detections = self.object_detector.get_detection_info(image)
         print(f"  Found {len(detections)} objects:")
         for det in detections[:5]:  # Show first 5
-            print(f"    - {det['class_name']} (confidence: {det['confidence']:.2f})")
+            print(f"    - {det['class_name']} (confidence: {det['confidence']:.2f}, "
+                  f"area: {det['area']/image.size*100:.1f}%)")
         
-        # Detect saliency (Layer 2: Eye-Catcher)
+        # Step 3: Detect saliency (fills gaps)
         saliency_map = None
         if self.enable_saliency and self.saliency_detector:
-            print("\n[Step 3/6] Detecting visual saliency...")
+            print("\n[Step 4/7] Detecting visual saliency...")
             saliency_map = self.saliency_detector.detect(image)
             salient_pixels = np.sum(saliency_map > 0.5)
             print(f"  Salient pixels: {salient_pixels} ({salient_pixels/image.size*100:.1f}%)")
         else:
-            print("\n[Step 3/6] Saliency detection skipped")
+            print("\n[Step 4/7] Saliency detection skipped")
         
-        # Segment semantics (Layer 3: Background)
+        # Step 4: Semantic segmentation (background)
         segmentation_masks = None
         if self.enable_segmentation and self.segmentor:
-            print("\n[Step 4/6] Performing semantic segmentation...")
+            print("\n[Step 5/7] Performing semantic segmentation...")
             segmentation_masks = self.segmentor.segment(image)
             for category, mask in segmentation_masks.items():
                 coverage = np.sum(mask > 0) / mask.size * 100
-                if coverage > 1.0:  # Only show significant categories
+                if coverage > 1.0:
                     print(f"  {category}: {coverage:.1f}%")
         else:
-            print("\n[Step 4/6] Semantic segmentation skipped")
+            print("\n[Step 5/7] Semantic segmentation skipped")
         
-        # Generate QP map
-        print("\n[Step 5/6] Generating QP map...")
+        # Step 5: Generate Intelligent QP map
+        print("\n[Step 6/7] Generating intelligent QP map...")
         qp_map = self.qp_generator.generate(
             image_shape=image.shape,
-            object_mask=object_mask,
+            scene=scene,
+            detections=detections,
             saliency_map=saliency_map,
             segmentation_masks=segmentation_masks
         )
@@ -207,18 +223,18 @@ class SaacCompressor:
         print(f"  Medium quality regions: {qp_stats['medium_quality_percent']:.1f}%")
         print(f"  Low quality regions: {qp_stats['low_quality_percent']:.1f}%")
         
-        # Save visualizations if requested
+        # Save visualizations
         if save_visualizations:
             vis_dir = visualization_dir or os.path.dirname(output_path)
             os.makedirs(vis_dir, exist_ok=True)
             self._save_visualizations(
-                image, object_mask, saliency_map, 
+                image, detections, saliency_map,
                 segmentation_masks, qp_map, vis_dir,
-                os.path.basename(input_path)
+                os.path.basename(input_path), scene
             )
         
-        # Encode with HEVC
-        print("\n[Step 6/6] Encoding with HEVC...")
+        # Step 6: Encode with HEVC
+        print("\n[Step 7/7] Encoding with HEVC...")
         try:
             success = self.encoder.encode_with_quality_zones(
                 input_path=encoding_input_path,
@@ -229,7 +245,6 @@ class SaacCompressor:
             if not success:
                 raise RuntimeError("Encoding failed")
         finally:
-            # Clean up temporary padded image if it was created
             if temp_padded_path and os.path.exists(temp_padded_path):
                 os.remove(temp_padded_path)
         
@@ -243,6 +258,8 @@ class SaacCompressor:
             'input_path': input_path,
             'output_path': output_path,
             'resolution': (w, h),
+            'scene': scene,
+            'scene_confidence': scene_confidence,
             'original_size_bytes': original_size,
             'compressed_size_bytes': compressed_size,
             'original_size_mb': original_size / (1024 * 1024),
@@ -260,6 +277,8 @@ class SaacCompressor:
         print(f"\n{'='*60}")
         print("COMPRESSION COMPLETE")
         print(f"{'='*60}")
+        print(f"Scene type:         {scene}")
+        print(f"Objects detected:   {len(detections)}")
         print(f"Original size:      {stats['original_size_mb']:.2f} MB")
         print(f"Compressed size:    {stats['compressed_size_mb']:.2f} MB")
         print(f"Compression ratio:  {compression_ratio:.2f}x")
@@ -269,67 +288,27 @@ class SaacCompressor:
         
         return stats
     
-    def compress_batch(self,
-                      input_paths: list,
-                      output_dir: str,
-                      save_visualizations: bool = False) -> list:
-        """
-        Compress multiple images.
-        
-        Args:
-            input_paths: List of input image paths
-            output_dir: Output directory
-            save_visualizations: Save visualizations for each image
-            
-        Returns:
-            List of statistics dictionaries
-        """
-        os.makedirs(output_dir, exist_ok=True)
-        
-        results = []
-        
-        for i, input_path in enumerate(input_paths):
-            print(f"\n{'#'*60}")
-            print(f"Processing {i+1}/{len(input_paths)}")
-            print(f"{'#'*60}")
-            
-            # Generate output path
-            basename = os.path.basename(input_path)
-            name, ext = os.path.splitext(basename)
-            output_path = os.path.join(output_dir, f"{name}_saac.hevc")
-            
-            try:
-                stats = self.compress_image(
-                    input_path=input_path,
-                    output_path=output_path,
-                    save_visualizations=save_visualizations,
-                    visualization_dir=os.path.join(output_dir, 'visualizations')
-                )
-                results.append(stats)
-            except Exception as e:
-                print(f"✗ Error processing {input_path}: {e}")
-                results.append({'input_path': input_path, 'error': str(e)})
-        
-        # Print batch summary
-        self._print_batch_summary(results)
-        
-        return results
-    
     def _save_visualizations(self,
                             image: np.ndarray,
-                            object_mask: np.ndarray,
+                            detections: List[Dict],
                             saliency_map: Optional[np.ndarray],
                             segmentation_masks: Optional[Dict],
                             qp_map: np.ndarray,
                             output_dir: str,
-                            base_name: str):
+                            base_name: str,
+                            scene: str):
         """Save visualization images."""
         print("\n  Saving visualizations...")
         
-        # Object detection overlay
-        obj_vis = image.copy()
-        obj_vis[object_mask > 0] = obj_vis[object_mask > 0] * 0.5 + np.array([0, 255, 0]) * 0.5
-        cv2.imwrite(os.path.join(output_dir, f"{base_name}_objects.jpg"), obj_vis)
+        # Detection visualization with segmentation masks
+        det_vis = self.object_detector.visualize_detections(image, detections, show_masks=True)
+        cv2.imwrite(os.path.join(output_dir, f"{base_name}_detections.jpg"), det_vis)
+        
+        # Prominence visualization
+        from .detectors.prominence import ProminenceCalculator
+        prom_calc = ProminenceCalculator()
+        prom_vis = prom_calc.visualize_prominence(image, detections)
+        cv2.imwrite(os.path.join(output_dir, f"{base_name}_prominence.jpg"), prom_vis)
         
         # Saliency map
         if saliency_map is not None:
@@ -341,34 +320,13 @@ class SaacCompressor:
         qp_vis = self.qp_generator.visualize_qp_map(qp_map)
         cv2.imwrite(os.path.join(output_dir, f"{base_name}_qp_map.jpg"), qp_vis)
         
+        # Scene info overlay
+        info_vis = image.copy()
+        cv2.putText(info_vis, f"Scene: {scene}", (20, 40),
+                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        cv2.imwrite(os.path.join(output_dir, f"{base_name}_scene.jpg"), info_vis)
+        
         print(f"  ✓ Visualizations saved to {output_dir}")
-    
-    def _print_batch_summary(self, results: list):
-        """Print summary of batch compression."""
-        successful = [r for r in results if 'error' not in r]
-        failed = len(results) - len(successful)
-        
-        if len(successful) == 0:
-            print("\n✗ All compressions failed")
-            return
-        
-        total_original = sum(r['original_size_mb'] for r in successful)
-        total_compressed = sum(r['compressed_size_mb'] for r in successful)
-        avg_ratio = sum(r['compression_ratio'] for r in successful) / len(successful)
-        total_time = sum(r['processing_time_seconds'] for r in successful)
-        
-        print(f"\n{'='*60}")
-        print("BATCH COMPRESSION SUMMARY")
-        print(f"{'='*60}")
-        print(f"Total images processed:  {len(successful)}/{len(results)}")
-        if failed > 0:
-            print(f"Failed:                  {failed}")
-        print(f"Total original size:     {total_original:.2f} MB")
-        print(f"Total compressed size:   {total_compressed:.2f} MB")
-        print(f"Average compression:     {avg_ratio:.2f}x")
-        print(f"Total space saved:       {total_original - total_compressed:.2f} MB")
-        print(f"Total processing time:   {total_time:.1f}s")
-        print(f"{'='*60}\n")
     
     def get_last_stats(self) -> Dict:
         """Get statistics from the last compression."""
