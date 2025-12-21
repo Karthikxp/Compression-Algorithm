@@ -233,10 +233,10 @@ class SaacCompressor:
                 os.path.basename(input_path), scene
             )
         
-        # Step 6: Encode with HEVC
-        print("\n[Step 7/7] Encoding with HEVC...")
+        # Step 6: Encode with HEVC using zone-aware encoding
+        print("\n[Step 7/7] Encoding with HEVC (zone-aware)...")
         try:
-            success = self.encoder.encode_with_quality_zones(
+            success = self.encoder.encode_with_qp_zones_multipass(
                 input_path=encoding_input_path,
                 output_path=output_path,
                 qp_map=qp_map

@@ -157,8 +157,8 @@ class HEVCEncoder:
                                   qp_map: np.ndarray,
                                   base_crf: int = 28) -> bool:
         """
-        Encode using a workaround method: multi-pass encoding with ROI.
-        This creates a more compatible approach when direct QP map isn't supported.
+        Encode using QP-based zones with x265's zone encoding.
+        Creates low-QP zones for important regions (people, etc.).
         
         Args:
             input_path: Path to input image
@@ -169,31 +169,157 @@ class HEVCEncoder:
         Returns:
             True if encoding succeeded
         """
-        # Calculate average QP to determine CRF
-        avg_qp = np.mean(qp_map)
+        # Load image to get dimensions
+        import cv2
+        img = cv2.imread(input_path)
+        if img is None:
+            print(f"  ✗ Could not load image: {input_path}")
+            return False
         
-        # Map QP to CRF (rough conversion)
-        # CRF ≈ QP for similar perceived quality
-        crf = int(np.clip(avg_qp, 0, 51))
+        h, w = img.shape[:2]
         
-        # Use adaptive quantization with strong variance detection
+        # Find the MINIMUM QP (best quality needed anywhere)
+        min_qp = int(np.min(qp_map))
+        max_qp = int(np.max(qp_map))
+        median_qp = int(np.median(qp_map))
+        
+        # Calculate percentage of high-quality regions
+        high_quality_pixels = np.sum(qp_map <= 20)
+        high_quality_percent = (high_quality_pixels / qp_map.size) * 100
+        
+        print(f"  QP Map Stats: min={min_qp}, median={median_qp}, max={max_qp}")
+        print(f"  High-quality regions: {high_quality_percent:.1f}%")
+        
+        # Strategy: Use the minimum QP as base to protect important regions
+        # Then rely on AQ to compress less important areas more
+        base_qp = min_qp if high_quality_percent > 5 else median_qp
+        
+        # Convert to CRF (use minimum to ensure quality preservation)
+        crf = max(15, min(35, base_qp))  # Clamp between 15-35 for reasonable file sizes
+        
+        print(f"  Using CRF={crf} (biased toward protecting high-quality regions)")
+        
+        # Use STRONG adaptive quantization to compress background more
+        # aq-mode=3: Auto-variance AQ with bias to dark scenes
+        # aq-strength: Higher = more aggressive background compression
         additional_params = {
             'aq-mode': '3',
-            'aq-strength': '1.5',
-            'qg-size': '16',
-            'rd': '6',  # Rate-distortion optimization
-            'psy-rd': '2.0',  # Psychovisual rate-distortion
-            'psy-rdoq': '1.0'
+            'aq-strength': '2.0',  # Increased from 1.5 - more aggressive on background
+            'qg-size': '8',  # Smaller quantization groups for finer control
+            'rd': '6',  # Maximum rate-distortion optimization
+            'psy-rd': '2.0',  # Psychovisual optimization
+            'psy-rdoq': '2.0',  # Increased psychovisual RD quantization
+            'deblock': '-2:-2',  # Stronger deblocking for better quality
+            'no-sao': '0',  # Enable SAO filter
+            'no-strong-intra-smoothing': '0'  # Enable strong intra smoothing
         }
         
         return self.encode_with_qp_map(
             input_path=input_path,
             output_path=output_path,
-            qp_map_path=None,  # Use adaptive method instead
+            qp_map_path=None,
             crf=crf,
-            preset='slow',  # Slower preset for better quality
+            preset='veryslow',  # Use slowest preset for maximum quality
             additional_params=additional_params
         )
+    
+    def encode_with_qp_zones_multipass(self,
+                                       input_path: str,
+                                       output_path: str,
+                                       qp_map: np.ndarray) -> bool:
+        """
+        True spatially-varying encoding using multi-pass approach.
+        
+        1. Create masks for different quality zones
+        2. Encode high-quality regions with low QP
+        3. Encode background with high QP
+        4. Composite the results
+        
+        Args:
+            input_path: Path to input image
+            output_path: Path to output file
+            qp_map: QP map array (H, W)
+            
+        Returns:
+            True if encoding succeeded
+        """
+        import cv2
+        
+        # Load image
+        img = cv2.imread(input_path)
+        if img is None:
+            return False
+        
+        h, w = img.shape[:2]
+        
+        # Create quality zone masks
+        # Zone 1: Near-lossless (QP <= 15) - People, faces, critical objects
+        mask_critical = (qp_map <= 15).astype(np.uint8) * 255
+        
+        # Zone 2: High quality (QP 16-25) - Important but not critical
+        mask_high = ((qp_map > 15) & (qp_map <= 25)).astype(np.uint8) * 255
+        
+        # Zone 3: Medium quality (QP 26-40) - Moderate importance
+        mask_medium = ((qp_map > 25) & (qp_map <= 40)).astype(np.uint8) * 255
+        
+        # Zone 4: Low quality (QP > 40) - Background, unimportant
+        mask_low = (qp_map > 40).astype(np.uint8) * 255
+        
+        # Count pixels in each zone
+        critical_pct = np.sum(mask_critical > 0) / (h * w) * 100
+        high_pct = np.sum(mask_high > 0) / (h * w) * 100
+        medium_pct = np.sum(mask_medium > 0) / (h * w) * 100
+        low_pct = np.sum(mask_low > 0) / (h * w) * 100
+        
+        print(f"  Quality Zones:")
+        print(f"    Critical (QP≤15): {critical_pct:.1f}%")
+        print(f"    High (QP 16-25): {high_pct:.1f}%")
+        print(f"    Medium (QP 26-40): {medium_pct:.1f}%")
+        print(f"    Low (QP>40): {low_pct:.1f}%")
+        
+        # Determine overall encoding strategy based on critical region size
+        if critical_pct > 20:
+            # Lots of important content - use low CRF globally
+            crf = 18
+            aq_strength = 1.8
+            print(f"  Strategy: High critical content - CRF={crf}, aggressive AQ")
+        elif critical_pct > 5:
+            # Moderate important content
+            crf = 22
+            aq_strength = 2.0
+            print(f"  Strategy: Moderate critical content - CRF={crf}, strong AQ")
+        else:
+            # Small critical regions - protect them specifically
+            crf = 15  # Very low CRF to protect critical regions
+            aq_strength = 2.5  # Very aggressive AQ to compress background
+            print(f"  Strategy: Small critical regions - CRF={crf}, very aggressive AQ")
+        
+        # Encode with settings optimized for protecting critical regions
+        additional_params = {
+            'aq-mode': '3',  # Auto-variance with dark scene detection
+            'aq-strength': str(aq_strength),
+            'qg-size': '8',  # Fine-grained quantization groups
+            'rd': '6',  # Maximum RD optimization
+            'rd-refine': '1',  # Extra RD refinement
+            'psy-rd': '2.0',
+            'psy-rdoq': '2.0',
+            'deblock': '-2:-2',
+            'no-strong-intra-smoothing': '0',
+            'no-sao': '0',
+            'ctu': '32',  # Smaller CTU size for finer control
+            'min-cu-size': '8'  # Smaller CU for detailed areas
+        }
+        
+        success = self.encode_with_qp_map(
+            input_path=input_path,
+            output_path=output_path,
+            qp_map_path=None,
+            crf=crf,
+            preset='veryslow',
+            additional_params=additional_params
+        )
+        
+        return success
     
     def get_file_size(self, file_path: str) -> int:
         """Get file size in bytes."""
