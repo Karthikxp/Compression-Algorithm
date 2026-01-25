@@ -88,6 +88,7 @@ class HEVCEncoder:
             self.ffmpeg_path,
             '-y',  # Overwrite output file
             '-i', input_path,
+            '-vf', 'format=yuv420p',  # Convert to YUV420p, strips alpha channel
             '-c:v', 'libx265',
             '-preset', preset,
             '-crf', str(crf)
@@ -303,9 +304,9 @@ class HEVCEncoder:
             'rd-refine': '1',  # Extra RD refinement
             'psy-rd': '2.0',
             'psy-rdoq': '2.0',
-            'deblock': '-2:-2',
-            'no-strong-intra-smoothing': '0',
-            'no-sao': '0',
+            'deblock': '-2,-2',  # Use comma, not colon
+            'strong-intra-smoothing': '0',  # Remove 'no-' prefix
+            'sao': '0',  # Remove 'no-' prefix
             'ctu': '32',  # Smaller CTU size for finer control
             'min-cu-size': '8'  # Smaller CU for detailed areas
         }

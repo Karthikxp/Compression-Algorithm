@@ -19,6 +19,7 @@ import time
 from typing import Optional, Dict, List
 
 from .detectors import ObjectDetector, SaliencyDetector, SemanticSegmentor, SceneClassifier
+from .detectors.scene_classifier import ClipSceneClassifier
 from .qp_map import QPMapGenerator
 from .encoder import HEVCEncoder
 
@@ -50,7 +51,7 @@ class SaacCompressor:
             yolo_model: YOLO model ('yolov8n-seg.pt' for segmentation)
             saliency_method: 'spectral', 'fine_grained', or 'u2net'
             segmentation_method: 'simple' or 'deeplabv3'
-            scene_method: 'simple', 'efficientnet', or 'resnet'
+            scene_method: 'simple', 'efficientnet', 'resnet', or 'clip'
             enable_saliency: Enable saliency detection
             enable_segmentation: Enable semantic segmentation
             blend_mode: 'priority' or 'weighted'
@@ -66,10 +67,18 @@ class SaacCompressor:
         
         # Initialize components in order
         print("\n[1/5] Loading Scene Classifier...")
-        self.scene_classifier = SceneClassifier(
-            method=scene_method,
-            device=device
-        )
+        if scene_method == 'clip':
+            # Use CLIP for superior semantic understanding
+            self.scene_classifier = ClipSceneClassifier(
+                model_name='ViT-B/32',  # Fast 149MB model
+                device=device
+            )
+        else:
+            # Use traditional methods (simple, efficientnet, resnet)
+            self.scene_classifier = SceneClassifier(
+                method=scene_method,
+                device=device
+            )
         
         print("\n[2/5] Loading Object Detector (Segmentation)...")
         self.object_detector = ObjectDetector(

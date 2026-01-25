@@ -56,12 +56,14 @@ def main():
     print()
     
     # Create compressor
+    # Note: Use scene_method='clip' for superior scene understanding (85-95% accuracy)
+    #       Requires CLIP installation: pip install git+https://github.com/openai/CLIP.git
     compressor = SaacCompressor(
         device=device,
         yolo_model='yolov8n-seg.pt',
         saliency_method='spectral',
         segmentation_method='simple',
-        scene_method='simple',
+        scene_method='simple',  # Options: 'simple', 'clip', 'efficientnet', 'resnet'
         enable_saliency=True,
         enable_segmentation=True,
         blend_mode='priority'

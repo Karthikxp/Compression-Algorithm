@@ -8,6 +8,9 @@ opencv-contrib-python>=4.8.0
 # Object Detection (YOLO)
 ultralytics>=8.0.0
 
+# Scene Classification (CLIP)
+git+https://github.com/openai/CLIP.git  # OpenAI CLIP for zero-shot classification
+
 # Saliency Detection
 gdown>=4.7.0  # For downloading pretrained models
 scikit-image>=0.21.0
