@@ -37,6 +37,25 @@ class IntentRuleEngine:
     # Intent-based rule profiles
     # Weight: 1.0 = maximum quality (QP 10), 0.0 = maximum compression (QP 51)
     INTENT_PROFILES = {
+        'portrait': {
+            'description': 'Portrait/People-focused scene - maximum quality on faces and people',
+            'weights': {
+                # People - absolute priority
+                'person': 1.0,
+                
+                # Personal items - high priority
+                'handbag': 0.7,
+                'backpack': 0.7,
+                'tie': 0.8,
+                'umbrella': 0.6,
+                'cell_phone': 0.7,
+                'book': 0.6,
+                
+                # Everything else - very low priority (background)
+                'default': 0.1
+            }
+        },
+        
         'restaurant': {
             'description': 'Restaurant/Dining scene - prioritize people and food',
             'weights': {
