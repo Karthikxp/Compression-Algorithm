@@ -36,7 +36,7 @@ def main():
         sys.exit(1)
     
     base_name = os.path.splitext(os.path.basename(input_path))[0]
-    output_path = f"{base_name}_compressed.hevc"
+    output_path = f"{base_name}_compressed.png"  # PNG output with pixel-level compression
     
     print(f"Compressing: {input_path}")
     print("="*70)
@@ -66,7 +66,8 @@ def main():
         scene_method='simple',  # Options: 'simple', 'clip', 'efficientnet', 'resnet'
         enable_saliency=True,
         enable_segmentation=True,
-        blend_mode='priority'
+        blend_mode='priority',
+        compression_mode='pixel'  # Pixel-level compression for PNG output
     )
     
     # Compress

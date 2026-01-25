@@ -42,7 +42,7 @@ def main():
         sys.exit(1)
     
     base_name = os.path.splitext(os.path.basename(input_path))[0]
-    output_path = f"{base_name}_compressed.hevc"
+    output_path = f"{base_name}_compressed.png"  # PNG output with pixel-level compression
     
     print(f"Compressing: {input_path}")
     print("="*70)
@@ -84,7 +84,8 @@ def main():
         scene_method='clip',  # ← Use CLIP for scene classification
         enable_saliency=True,
         enable_segmentation=True,
-        blend_mode='priority'
+        blend_mode='priority',
+        compression_mode='pixel'  # Pixel-level compression for PNG output
     )
     
     # Compress
@@ -123,9 +124,16 @@ def main():
     print(f"\n📦 Compression Results:")
     print(f"  Objects found:  {stats['detections']}")
     print(f"  Original size:  {stats['original_size_mb']:.2f} MB")
-    print(f"  Compressed:     {stats['compressed_size_mb']:.2f} MB")
-    print(f"  Ratio:          {stats['compression_ratio']:.2f}x")
-    print(f"  Space saved:    {stats['space_saved_percent']:.1f}%")
+    
+    if stats.get('hevc_size_mb'):
+        print(f"  PNG output:     {stats['compressed_size_mb']:.2f} MB ({stats['compression_ratio']:.2f}x)")
+        print(f"  HEVC backup:    {stats['hevc_size_mb']:.2f} MB ({stats['hevc_compression_ratio']:.2f}x)")
+        print(f"  PNG savings:    {stats['space_saved_percent']:.1f}% (compressed pixels)")
+    else:
+        print(f"  Compressed:     {stats['compressed_size_mb']:.2f} MB")
+        print(f"  Ratio:          {stats['compression_ratio']:.2f}x")
+        print(f"  Space saved:    {stats['space_saved_percent']:.1f}%")
+    
     print(f"  Processing:     {stats['processing_time_seconds']:.1f}s")
     
     print(f"\n📈 Quality Allocation:")

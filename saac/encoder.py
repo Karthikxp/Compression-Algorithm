@@ -338,6 +338,129 @@ class HEVCEncoder:
         
         return input_size / output_size
     
+    def encode_with_image_output(self,
+                                input_path: str,
+                                output_path: str,
+                                qp_map: np.ndarray,
+                                output_format: str = 'jpeg',
+                                quality: int = 85,
+                                keep_hevc: bool = True) -> tuple:
+        """
+        Compress using HEVC quality allocation, then output as viewable image.
+        
+        Supports multiple output formats:
+        - jpeg: Best for photos (85% quality = good compression, good quality)
+        - webp: Modern format (better than JPEG, universal browser support)
+        - png: Lossless but LARGE after decoding (not recommended)
+        
+        Args:
+            input_path: Original image
+            output_path: Output image path
+            qp_map: Quality map for spatially-varying compression
+            output_format: 'jpeg', 'webp', or 'png'
+            quality: Quality setting for JPEG/WebP (1-100, default 85)
+            keep_hevc: If True, also save HEVC file for archival
+            
+        Returns:
+            (success, hevc_path) tuple
+        """
+        import tempfile
+        import cv2
+        
+        # Step 1: Compress to HEVC (maximum compression with quality allocation)
+        if keep_hevc:
+            # Save HEVC with .hevc extension
+            base = os.path.splitext(output_path)[0]
+            hevc_path = f"{base}.hevc"
+        else:
+            # Use temporary file
+            hevc_path = tempfile.mktemp(suffix='.hevc')
+        
+        print(f"  [1/2] Encoding to HEVC with quality zones...")
+        success = self.encode_with_qp_zones_multipass(
+            input_path=input_path,
+            output_path=hevc_path,
+            qp_map=qp_map
+        )
+        
+        if not success:
+            print(f"  ✗ HEVC encoding failed")
+            return False, None
+        
+        hevc_size = os.path.getsize(hevc_path)
+        print(f"  ✓ HEVC saved: {hevc_size / 1024:.1f} KB (maximum compression)")
+        
+        # Step 2: Decode HEVC to viewable format
+        format_name = output_format.upper()
+        print(f"  [2/2] Decoding to {format_name} for viewing...")
+        
+        # Build ffmpeg command based on output format
+        if output_format == 'jpeg':
+            cmd = [
+                self.ffmpeg_path, '-y',
+                '-i', hevc_path,
+                '-q:v', str(int((100 - quality) / 3.125)),  # Convert 0-100 to 2-31 scale
+                output_path
+            ]
+        elif output_format == 'webp':
+            cmd = [
+                self.ffmpeg_path, '-y',
+                '-i', hevc_path,
+                '-c:v', 'libwebp',
+                '-quality', str(quality),
+                output_path
+            ]
+        elif output_format == 'png':
+            cmd = [
+                self.ffmpeg_path, '-y',
+                '-i', hevc_path,
+                '-f', 'image2',
+                '-vcodec', 'png',
+                '-compression_level', '9',
+                output_path
+            ]
+        else:
+            print(f"  ✗ Unsupported format: {output_format}")
+            return False, hevc_path
+        
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+            
+            # Clean up temporary HEVC if not keeping
+            if not keep_hevc and os.path.exists(hevc_path):
+                os.remove(hevc_path)
+                hevc_path = None
+            
+            if result.returncode == 0:
+                output_size = os.path.getsize(output_path)
+                original_size = os.path.getsize(input_path)
+                
+                print(f"  ✓ {format_name} saved: {output_size / (1024*1024):.2f} MB")
+                
+                # Compare sizes
+                if output_size < original_size:
+                    reduction = (1 - output_size / original_size) * 100
+                    print(f"  ✅ {reduction:.1f}% smaller than original!")
+                else:
+                    increase = (output_size / original_size - 1) * 100
+                    print(f"  ⚠️  {increase:.1f}% larger than original (HEVC is still best)")
+                
+                return True, hevc_path
+            else:
+                print(f"  ✗ {format_name} conversion failed: {result.stderr}")
+                return False, hevc_path
+                
+        except Exception as e:
+            print(f"  ✗ Conversion error: {e}")
+            if not keep_hevc and os.path.exists(hevc_path):
+                os.remove(hevc_path)
+            return False, None
+    
     def batch_encode(self,
                     input_paths: list,
                     output_dir: str,

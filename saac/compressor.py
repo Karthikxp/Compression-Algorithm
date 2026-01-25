@@ -22,6 +22,7 @@ from .detectors import ObjectDetector, SaliencyDetector, SemanticSegmentor, Scen
 from .detectors.scene_classifier import ClipSceneClassifier
 from .qp_map import QPMapGenerator
 from .encoder import HEVCEncoder
+from .pixel_compressor import PixelCompressor
 
 
 class SaacCompressor:
@@ -42,7 +43,8 @@ class SaacCompressor:
                  scene_method: str = 'simple',
                  enable_saliency: bool = True,
                  enable_segmentation: bool = True,
-                 blend_mode: str = 'priority'):
+                 blend_mode: str = 'priority',
+                 compression_mode: str = 'pixel'):
         """
         Initialize the intelligent SAAC compressor.
         
@@ -55,15 +57,20 @@ class SaacCompressor:
             enable_saliency: Enable saliency detection
             enable_segmentation: Enable semantic segmentation
             blend_mode: 'priority' or 'weighted'
+            compression_mode: 'pixel' (PNG output) or 'hevc' (HEVC output)
         """
         print("="*60)
         print("Initializing SAAC")
-        print("Scene-Aware + Prominence-Based Compression")
+        if compression_mode == 'pixel':
+            print("Mode: Pixel-Level Compression (PNG output)")
+        else:
+            print("Mode: HEVC Encoding")
         print("="*60)
         
         self.device = device
         self.enable_saliency = enable_saliency
         self.enable_segmentation = enable_segmentation
+        self.compression_mode = compression_mode
         
         # Initialize components in order
         print("\n[1/5] Loading Scene Classifier...")
@@ -114,7 +121,15 @@ class SaacCompressor:
             blend_mode=blend_mode
         )
         
-        self.encoder = HEVCEncoder()
+        # Compression engines
+        if compression_mode == 'hevc':
+            print("\n[5/5] Loading HEVC Encoder...")
+            self.encoder = HEVCEncoder()
+            self.pixel_compressor = None
+        else:  # pixel mode
+            print("\n[5/5] Loading Pixel Compressor...")
+            self.pixel_compressor = PixelCompressor()
+            self.encoder = None
         
         # Statistics
         self.last_stats = {}
@@ -242,17 +257,87 @@ class SaacCompressor:
                 os.path.basename(input_path), scene
             )
         
-        # Step 6: Encode with HEVC using zone-aware encoding
-        print("\n[Step 7/7] Encoding with HEVC (zone-aware)...")
+        # Step 6: Compress
+        print("\n[Step 7/7] Compressing with smart quality allocation...")
+        
+        output_ext = os.path.splitext(output_path)[1].lower()
+        
         try:
-            success = self.encoder.encode_with_qp_zones_multipass(
-                input_path=encoding_input_path,
-                output_path=output_path,
-                qp_map=qp_map
-            )
+            if self.compression_mode == 'pixel':
+                # PIXEL MODE: Selectively degrade pixels, save as PNG
+                print("  Mode: Pixel-level compression (PNG output)")
+                
+                # Apply selective degradation based on QP map
+                compressed_pixels = self.pixel_compressor.compress_by_qp_map(
+                    image=image,
+                    qp_map=qp_map,
+                    preserve_edges=True
+                )
+                
+                # Calculate complexity reduction
+                complexity = self.pixel_compressor.get_complexity_reduction(
+                    original=image,
+                    compressed=compressed_pixels
+                )
+                
+                print(f"  Complexity reduced:")
+                print(f"    Edge density: {complexity['edge_reduction']:.1f}% reduction")
+                print(f"    Unique colors: {complexity['color_reduction']:.1f}% reduction")
+                
+                # Save as PNG with maximum compression
+                print(f"  Saving to PNG with maximum compression level...")
+                cv2.imwrite(output_path, compressed_pixels, 
+                           [cv2.IMWRITE_PNG_COMPRESSION, 9])
+                
+                hevc_path = None
+                success = os.path.exists(output_path)
+                
+                if success:
+                    output_size = os.path.getsize(output_path)
+                    original_size = os.path.getsize(input_path)
+                    ratio = original_size / output_size if output_size > 0 else 0
+                    
+                    print(f"  ✓ PNG saved: {output_size / (1024*1024):.2f} MB")
+                    if ratio > 1:
+                        print(f"  ✅ {(1 - 1/ratio)*100:.1f}% smaller than original!")
+                    else:
+                        print(f"  ⚠️  Output is larger (try more aggressive compression)")
+                
+            else:
+                # HEVC MODE: Traditional HEVC encoding
+                print("  Mode: HEVC encoding")
+                
+                if output_ext in ['.png', '.jpg', '.jpeg', '.webp']:
+                    # Image output: Compress with HEVC, decode to viewable format
+                    output_format = {
+                        '.png': 'png',
+                        '.jpg': 'jpeg',
+                        '.jpeg': 'jpeg',
+                        '.webp': 'webp'
+                    }[output_ext]
+                    
+                    print(f"  Output format: {output_format.upper()} + HEVC")
+                    success, hevc_path = self.encoder.encode_with_image_output(
+                        input_path=encoding_input_path,
+                        output_path=output_path,
+                        qp_map=qp_map,
+                        output_format=output_format,
+                        quality=85,
+                        keep_hevc=True
+                    )
+                else:
+                    # HEVC output: Direct encoding
+                    print("  Output format: HEVC")
+                    success = self.encoder.encode_with_qp_zones_multipass(
+                        input_path=encoding_input_path,
+                        output_path=output_path,
+                        qp_map=qp_map
+                    )
+                    hevc_path = output_path
             
             if not success:
-                raise RuntimeError("Encoding failed")
+                raise RuntimeError("Compression failed")
+                
         finally:
             if temp_padded_path and os.path.exists(temp_padded_path):
                 os.remove(temp_padded_path)
@@ -262,6 +347,13 @@ class SaacCompressor:
         original_size = os.path.getsize(input_path)
         compressed_size = os.path.getsize(output_path)
         compression_ratio = original_size / compressed_size if compressed_size > 0 else 0
+        
+        # If PNG output, also track HEVC size
+        hevc_size = None
+        hevc_ratio = None
+        if output_ext == '.png' and hevc_path and os.path.exists(hevc_path):
+            hevc_size = os.path.getsize(hevc_path)
+            hevc_ratio = original_size / hevc_size if hevc_size > 0 else 0
         
         stats = {
             'input_path': input_path,
@@ -277,7 +369,12 @@ class SaacCompressor:
             'space_saved_percent': (1 - 1/compression_ratio) * 100 if compression_ratio > 0 else 0,
             'processing_time_seconds': elapsed_time,
             'detections': len(detections),
-            'qp_statistics': qp_stats
+            'qp_statistics': qp_stats,
+            'hevc_path': hevc_path,
+            'hevc_size_bytes': hevc_size,
+            'hevc_size_mb': hevc_size / (1024 * 1024) if hevc_size else None,
+            'hevc_compression_ratio': hevc_ratio,
+            'hevc_space_saved_percent': (1 - 1/hevc_ratio) * 100 if hevc_ratio and hevc_ratio > 0 else None
         }
         
         self.last_stats = stats
@@ -289,10 +386,21 @@ class SaacCompressor:
         print(f"Scene type:         {scene}")
         print(f"Objects detected:   {len(detections)}")
         print(f"Original size:      {stats['original_size_mb']:.2f} MB")
-        print(f"Compressed size:    {stats['compressed_size_mb']:.2f} MB")
-        print(f"Compression ratio:  {compression_ratio:.2f}x")
-        print(f"Space saved:        {stats['space_saved_percent']:.1f}%")
-        print(f"Processing time:    {elapsed_time:.1f}s")
+        
+        if output_ext == '.png' and stats['hevc_size_mb']:
+            # PNG output - show both formats
+            print(f"\n📦 Dual Output:")
+            print(f"  PNG (compatible):  {stats['compressed_size_mb']:.2f} MB ({compression_ratio:.2f}x smaller)")
+            print(f"  HEVC (archival):   {stats['hevc_size_mb']:.2f} MB ({stats['hevc_compression_ratio']:.2f}x smaller)")
+            print(f"\n💡 PNG is {stats['space_saved_percent']:.1f}% smaller than original")
+            print(f"   (Contains already-compressed pixel data)")
+        else:
+            # HEVC only
+            print(f"Compressed size:    {stats['compressed_size_mb']:.2f} MB")
+            print(f"Compression ratio:  {compression_ratio:.2f}x")
+            print(f"Space saved:        {stats['space_saved_percent']:.1f}%")
+        
+        print(f"\nProcessing time:    {elapsed_time:.1f}s")
         print(f"{'='*60}\n")
         
         return stats

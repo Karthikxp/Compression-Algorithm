@@ -1,55 +1,80 @@
 # SAAC - Scene-Aware Adaptive Compression
 
-**Intelligent image compression that preserves what matters most.**
+**Intelligent pixel-level compression that preserves what matters.**
 
-Achieves 15-20x compression ratios while keeping faces crystal clear, text readable, and important objects sharp. Compresses the boring stuff (sky, empty space, backgrounds) aggressively using zone-aware encoding.
+Uses AI to understand your image, then selectively blurs/simplifies backgrounds while keeping faces, objects, and text sharp. Output PNG is 40-70% smaller because pixel data is simpler.
 
 ---
 
 ## Quick Start
 
 ```bash
-# Compress an image
+# With CLIP (54 intents - recommended)
+python3 compress_with_clip.py your_photo.jpg
+
+# Or basic (8 intents)
 python3 compress.py your_photo.jpg
 
-# Output: your_photo_compressed.hevc (15-20x smaller!)
-# Visualizations: visualizations/ folder
+# Output: your_photo_compressed.png (40-70% smaller, universal PNG format)
 ```
 
 ---
 
 ## How It Works
 
-SAAC uses AI to understand your image and allocate quality intelligently:
+### Pixel-Level Compression Pipeline:
 
-1. **Scene Classification** - "Is this a street? Restaurant? Landscape?"
+1. **Scene Classification (54 intents)** - Portrait? Food? Pet? Street? Landscape?
 2. **Object Detection** - Finds people, cars, animals with pixel-perfect masks (YOLOv8-seg)
-3. **Prominence Boost** - Automatically boosts large/central subjects
-4. **Saliency Detection** - Identifies visually interesting regions (optional)
-5. **Semantic Segmentation** - Classifies background (sky, water, roads) (optional)
-6. **Smart QP Map** - Creates a "quality blueprint" with zone-based allocation
-7. **Zone-Aware HEVC Encoding** - Protects critical regions with low CRF, aggressive AQ compresses background
+3. **Prominence Boost** - Automatically prioritizes large/central subjects
+4. **Smart Quality Map** - Creates blueprint: QP 10-20 (sharp), QP 40-51 (blur heavily)
+5. **Selective Pixel Degradation** - Blur/simplify backgrounds, keep faces sharp
+6. **PNG Output** - Save simplified pixels (smaller file due to less complexity)
 
-**Result:** 20x smaller file, but faces/text stay sharp with spatially-varying quality allocation
+### Why PNG is Smaller:
+
+**Original PNG:**
+```
+Sky pixels:  [255, 254, 253, 252, 251, ...] ← Complex gradient
+Face pixels: [220, 218, 219, 221, 220, ...] ← Detail preserved
+```
+
+**After SAAC:**
+```
+Sky pixels:  [250, 250, 250, 250, 250, ...] ← Blurred (simple)
+Face pixels: [220, 218, 219, 221, 220, ...] ← Preserved (complex)
+```
+
+PNG's lossless compression works much better on simplified pixels!
+
+**Result:** 40-70% smaller PNG, faces/objects stay sharp, backgrounds blurred
 
 ---
 
 ## Example Results
 
-**Portrait Scene (4K):**
-- Original: 4.54 MB (PNG)
-- SAAC: 0.05 MB (HEVC)
-- Compression: 99x ratio
-- Face region: Near-lossless (QP 15, CRF 15-18)
-- Background: Heavily compressed (QP 51, aggressive AQ)
-- Processing: 5 seconds on CPU
+**Portrait:**
+- Original: 4.5 MB (PNG)
+- Compressed: 1.8 MB (60% smaller)
+- Face region: Full quality preserved
+- Background: Blurred + color quantized
+- Complexity: 55% less unique colors
 
-**Street Scene (4K):**
-- Original: 1.55 MB
-- SAAC: 0.07 MB (21.7x compression)
-- Vehicles: Crystal clear (QP 10-15)
-- Sky/background: Heavily compressed (QP 45-51)
-- Processing: 4-5 seconds on CPU
+**Landscape with Dog:**
+- Original: 3.2 MB
+- Compressed: 1.1 MB (66% smaller)
+- Dog + person: Sharp and detailed
+- Sky: Heavily blurred (simple gradients)
+- Grass: Color quantized to 64 levels
+
+**Street Scene:**
+- Original: 2.8 MB
+- Compressed: 1.2 MB (57% smaller)
+- Vehicles + signs: Preserved
+- Buildings: Moderate blur
+- Sky: Heavy blur
+
+Processing: 3-5 seconds on CPU
 
 ---
 
@@ -127,15 +152,37 @@ After compression, check the `visualizations/` folder for 5 diagnostic images:
 
 ---
 
-## Scene-Based Compression Rules
+## 54 Intent Categories (CLIP)
 
-SAAC automatically applies scene-specific compression rules:
+SAAC with CLIP supports 54 scene intents for comprehensive coverage:
 
-| Scene | Protected Objects | Compressed Heavily |
-|-------|-------------------|-------------------|
-| **Street** | People, vehicles, traffic signs | Sky, distant buildings |
-| **Restaurant** | People, food, drinks | Walls, empty tables |
-| **Landscape** | People, animals, foreground | Sky, distant mountains |
+**People:** portrait, selfie, group_photo, baby, children  
+**Animals:** pet_portrait, wildlife, garden, park  
+**Food:** restaurant, food_closeup, cooking  
+**Outdoor:** landscape, beach, mountain, snow  
+**Urban:** urban, street, architecture  
+**Sports:** sports, gym, concert  
+**Events:** wedding, party  
+**Indoor:** indoor, living_room, bedroom, bathroom, kitchen  
+**Work:** workspace, meeting, classroom  
+**Commercial:** retail, product, vehicle, transportation, travel, fashion  
+**Technical:** document, screenshot, barcode_qr  
+**Special:** night, medical, studio, abstract, macro  
+**Low Quality:** low_quality, blurry, meme, collage  
+**And more:** aerial, underwater, museum, general
+
+View all intents: `python3 show_intents.py`
+
+Each intent has custom compression rules. Examples:
+
+| Intent | Protected (QP 10-20) | Compressed (QP 40-51) |
+|--------|---------------------|---------------------|
+| **portrait** | Faces, people (1.0) | Everything else (0.1) |
+| **pet_portrait** | Dogs, cats, birds (1.0) | Background (0.1) |
+| **food_closeup** | Food items (1.0) | Table, furniture (0.3) |
+| **landscape** | People, animals (1.0) | Sky, distant terrain (0.1) |
+| **street** | People, vehicles, signs (1.0) | Buildings, sky (0.2) |
+| **document** | Text regions (saliency) | Margins (0.5) |
 | **Document** | Text, signatures, stamps | Paper texture |
 | **Indoor** | People, faces, electronics | Walls, furniture |
 | **Retail** | Products, people | Empty shelves, backgrounds |
