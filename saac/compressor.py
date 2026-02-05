@@ -22,6 +22,7 @@ from .detectors import ObjectDetector, SaliencyDetector, SemanticSegmentor, Scen
 from .detectors.scene_classifier import ClipSceneClassifier
 from .qp_map import QPMapGenerator
 from .encoder import HEVCEncoder
+from .avif_encoder import AVIFEncoder
 from .pixel_compressor import PixelCompressor
 
 
@@ -57,12 +58,14 @@ class SaacCompressor:
             enable_saliency: Enable saliency detection
             enable_segmentation: Enable semantic segmentation
             blend_mode: 'priority' or 'weighted'
-            compression_mode: 'pixel' (PNG output) or 'hevc' (HEVC output)
+            compression_mode: 'pixel' (PNG output), 'hevc' (HEVC output), or 'avif' (AVIF output)
         """
         print("="*60)
         print("Initializing SAAC")
         if compression_mode == 'pixel':
             print("Mode: Pixel-Level Compression (PNG output)")
+        elif compression_mode == 'avif':
+            print("Mode: AVIF Encoding (Modern AV1 format)")
         else:
             print("Mode: HEVC Encoding")
         print("="*60)
@@ -125,11 +128,18 @@ class SaacCompressor:
         if compression_mode == 'hevc':
             print("\n[5/5] Loading HEVC Encoder...")
             self.encoder = HEVCEncoder()
+            self.avif_encoder = None
+            self.pixel_compressor = None
+        elif compression_mode == 'avif':
+            print("\n[5/5] Loading AVIF Encoder...")
+            self.avif_encoder = AVIFEncoder()
+            self.encoder = None
             self.pixel_compressor = None
         else:  # pixel mode
             print("\n[5/5] Loading Pixel Compressor...")
             self.pixel_compressor = PixelCompressor()
             self.encoder = None
+            self.avif_encoder = None
         
         # Statistics
         self.last_stats = {}
@@ -263,7 +273,30 @@ class SaacCompressor:
         output_ext = os.path.splitext(output_path)[1].lower()
         
         try:
-            if self.compression_mode == 'pixel':
+            if self.compression_mode == 'avif':
+                # AVIF MODE: Modern AV1-based image compression
+                print("  Mode: AVIF encoding (AV1 codec)")
+                
+                # Encode with quality zones using QP map
+                success = self.avif_encoder.encode_with_quality_zones(
+                    input_path=encoding_input_path,
+                    output_path=output_path,
+                    qp_map=qp_map
+                )
+                
+                if success and os.path.exists(output_path):
+                    output_size = os.path.getsize(output_path)
+                    original_size = os.path.getsize(input_path)
+                    ratio = original_size / output_size if output_size > 0 else 0
+                    
+                    print(f"  ✓ AVIF saved: {output_size / (1024*1024):.2f} MB")
+                    print(f"  ✓ Compression ratio: {ratio:.2f}x")
+                    if ratio > 1:
+                        print(f"  ✅ {(1 - 1/ratio)*100:.1f}% smaller than original!")
+                
+                hevc_path = None
+                
+            elif self.compression_mode == 'pixel':
                 # PIXEL MODE: Selectively degrade pixels, save as PNG
                 print("  Mode: Pixel-level compression (PNG output)")
                 
@@ -394,8 +427,17 @@ class SaacCompressor:
             print(f"  HEVC (archival):   {stats['hevc_size_mb']:.2f} MB ({stats['hevc_compression_ratio']:.2f}x smaller)")
             print(f"\n💡 PNG is {stats['space_saved_percent']:.1f}% smaller than original")
             print(f"   (Contains already-compressed pixel data)")
+        elif output_ext == '.avif':
+            # AVIF output
+            print(f"Compressed size:    {stats['compressed_size_mb']:.2f} MB")
+            print(f"Compression ratio:  {compression_ratio:.2f}x")
+            print(f"Space saved:        {stats['space_saved_percent']:.1f}%")
+            print(f"\n✨ AVIF Benefits:")
+            print(f"  • Superior compression (30-50% smaller than JPEG)")
+            print(f"  • Wide browser support (Chrome, Firefox, Safari 16+)")
+            print(f"  • Content-aware quality allocation applied")
         else:
-            # HEVC only
+            # HEVC or other
             print(f"Compressed size:    {stats['compressed_size_mb']:.2f} MB")
             print(f"Compression ratio:  {compression_ratio:.2f}x")
             print(f"Space saved:        {stats['space_saved_percent']:.1f}%")

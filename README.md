@@ -9,14 +9,58 @@ Uses AI to understand your image, then selectively blurs/simplifies backgrounds 
 ## Quick Start
 
 ```bash
-# With CLIP (54 intents - recommended)
+# AVIF format (NEW - recommended for web)
+python3 compress_to_avif.py your_photo.jpg
+# Output: your_photo_compressed.avif (30-50% smaller than JPEG, wide browser support)
+
+# Pixel-level PNG compression with CLIP (54 intents)
 python3 compress_with_clip.py your_photo.jpg
+# Output: your_photo_compressed.png (40-70% smaller, universal PNG format)
 
 # Or basic (8 intents)
 python3 compress.py your_photo.jpg
 
-# Output: your_photo_compressed.png (40-70% smaller, universal PNG format)
+# Preview AVIF files
+python3 preview_avif.py your_photo_compressed.avif
 ```
+
+---
+
+## 🆕 AVIF Compression (NEW)
+
+**Modern format with superior compression and wide browser support!**
+
+### Why AVIF?
+- **30-50% smaller** than JPEG/WebP at same quality
+- **Wide browser support**: Chrome 85+, Firefox 93+, Safari 16+, Edge 121+
+- **AV1 codec**: Royalty-free, state-of-the-art compression
+- **Content-aware**: Uses same QP map for quality allocation
+- **HDR support**: Wide color gamut and high dynamic range
+- **Perfect for web**: Direct browser rendering, no plugins needed
+
+### AVIF Compression Pipeline:
+1. **Scene Classification** - Understand image context (portrait, landscape, etc.)
+2. **Object Detection** - Find people, objects with pixel-perfect masks
+3. **Quality Map Generation** - Create adaptive QP map (10-51)
+4. **AV1 Encoding** - Encode with spatially-varying quality using FFmpeg libaom-av1
+5. **AVIF Output** - Universal format with superior compression
+
+### Usage:
+```bash
+# Compress to AVIF
+python3 compress_to_avif.py photo.jpg
+
+# Preview/decode AVIF to PNG
+python3 preview_avif.py photo_compressed.avif
+```
+
+### AVIF vs Other Formats:
+| Format | Compression | Quality | Browser Support | Best Use |
+|--------|-------------|---------|-----------------|----------|
+| **AVIF** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | Web delivery, archival |
+| **WebP** | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | Web images |
+| **JPEG** | ⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ | Legacy support |
+| **PNG (SAAC)** | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | Universal compatibility |
 
 ---
 
@@ -85,16 +129,19 @@ Processing: 3-5 seconds on CPU
 pip install -r requirements.txt
 ```
 
-### 2. Install FFmpeg (Required for encoding)
+### 2. Install FFmpeg (Required for AVIF/HEVC encoding)
 ```bash
-# macOS
+# macOS (includes AV1 support for AVIF)
 brew install ffmpeg
 
-# Ubuntu/Debian
-sudo apt-get install ffmpeg libx265-dev
+# Ubuntu/Debian (includes AV1 support for AVIF)
+sudo apt-get install ffmpeg libx265-dev libaom-dev
 
 # Windows
 choco install ffmpeg
+
+# Verify AV1 support for AVIF
+ffmpeg -encoders | grep av1
 ```
 
 ### 3. Test Installation
@@ -107,27 +154,32 @@ python3 -c "from saac import SaacCompressor; print('✅ SAAC Ready!')"
 ## 💡 Python API Usage
 
 ```python
-from saac import SaacCompressor
+from saac import SaacCompressor, AVIFEncoder
 
-# Create compressor
+# Create compressor with AVIF mode
 compressor = SaacCompressor(
     device='cpu',  # or 'cuda' for GPU
     yolo_model='yolov8n-seg.pt',
     saliency_method='spectral',
     segmentation_method='simple',
-    scene_method='simple'
+    scene_method='clip',  # or 'simple'
+    compression_mode='avif'  # 'avif', 'pixel', or 'hevc'
 )
 
-# Compress an image
+# Compress to AVIF
 stats = compressor.compress_image(
     input_path='photo.jpg',
-    output_path='compressed.hevc',
+    output_path='compressed.avif',
     save_visualizations=True
 )
 
 print(f"Compression ratio: {stats['compression_ratio']:.2f}x")
 print(f"Scene detected: {stats['scene']}")
 print(f"Objects found: {stats['detections']}")
+
+# Decode AVIF to PNG for preview
+encoder = AVIFEncoder()
+encoder.decode_avif_to_png('compressed.avif', 'preview.png')
 ```
 
 ---
@@ -234,7 +286,10 @@ YOLOv8-seg provides exact object boundaries (not just bounding boxes), so qualit
 
 ```
 saac/
-├── compress.py              # Main compression script
+├── compress.py              # Basic PNG compression
+├── compress_with_clip.py    # PNG compression with CLIP
+├── compress_to_avif.py      # AVIF compression (NEW)
+├── preview_avif.py          # AVIF preview tool (NEW)
 ├── requirements.txt         # Python dependencies
 ├── setup.py                 # Package installer
 ├── yolov8n-seg.pt          # YOLO segmentation model (2.7 MB)
@@ -244,6 +299,8 @@ saac/
 │   ├── qp_map.py            # Smart QP map generator
 │   ├── intent_rules.py      # Scene-based rule profiles
 │   ├── encoder.py           # FFmpeg HEVC wrapper
+│   ├── avif_encoder.py      # FFmpeg AVIF/AV1 wrapper (NEW)
+│   ├── pixel_compressor.py  # Pixel-level compression
 │   └── detectors/
 │       ├── object_detector.py    # YOLOv8-seg
 │       ├── saliency_detector.py  # Saliency detection
@@ -420,9 +477,10 @@ If you use SAAC in research:
 
 ---
 
-**Built with:** Python • PyTorch • YOLOv8 • OpenCV • FFmpeg (x265)
+**Built with:** Python • PyTorch • YOLOv8 • OpenCV • FFmpeg (x265, libaom-av1)
 **Version:** 2.1.0
 **Status:** Production Ready
+**New in 2.1.0:** AVIF compression support with AV1 codec
 
 ---
 
