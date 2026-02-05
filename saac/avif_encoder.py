@@ -301,6 +301,12 @@ class AVIFEncoder:
         import cv2
         
         h, w = image.shape[:2]
+        
+        # Ensure QP map matches image dimensions (fix potential rounding issues from smoothing)
+        if qp_map.shape[0] != h or qp_map.shape[1] != w:
+            print(f"        ⚠️  QP map shape {qp_map.shape} != image shape ({h}, {w}), resizing...")
+            qp_map = cv2.resize(qp_map, (w, h), interpolation=cv2.INTER_NEAREST)
+        
         output = image.copy().astype(np.float32)
         
         print(f"      Applying QP-based pixel degradation:")

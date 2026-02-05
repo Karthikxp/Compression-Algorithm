@@ -164,17 +164,31 @@ class QPMapGenerator:
         return weight_map
     
     def _apply_saliency(self, weight_map: np.ndarray, saliency_map: np.ndarray) -> np.ndarray:
-        """Apply saliency to fill in gaps between detected objects."""
-        # Saliency contributes where objects haven't been detected
-        # Scale saliency contribution: 0.6x for moderate boost
-        saliency_weight = saliency_map * 0.6
+        """
+        Apply saliency with MAXIMUM influence - saliency is superior for text/detail detection.
+        
+        Saliency now DOMINATES the quality allocation, overriding low-importance objects.
+        Only high-importance objects (persons, etc.) can override saliency.
+        """
+        # Full 1.0x saliency contribution (was 0.6x, then 0.9x, now FULL power)
+        saliency_weight = saliency_map * 1.0
         
         if self.blend_mode == 'priority':
-            # Take maximum
+            # ALWAYS take maximum - saliency can override low-importance objects
             weight_map = np.maximum(weight_map, saliency_weight)
+            
+            # Additional boost: where saliency is high (>0.7) and object weight is low (<0.5),
+            # give saliency even MORE influence
+            high_saliency_mask = (saliency_map > 0.7) & (weight_map < 0.5)
+            if np.any(high_saliency_mask):
+                # Boost high-saliency regions to at least 0.85 weight
+                weight_map[high_saliency_mask] = np.maximum(
+                    weight_map[high_saliency_mask], 
+                    0.85
+                )
         else:
-            # Blend with existing weights
-            weight_map = 0.7 * weight_map + 0.3 * saliency_weight
+            # Weighted mode: Give saliency MAJORITY influence (70%)
+            weight_map = 0.3 * weight_map + 0.7 * saliency_weight
             weight_map = np.clip(weight_map, 0, 1)
         
         return weight_map
