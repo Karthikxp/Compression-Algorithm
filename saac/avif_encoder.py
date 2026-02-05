@@ -192,12 +192,13 @@ class AVIFEncoder:
                                   qp_map: np.ndarray,
                                   base_crf: int = 30) -> bool:
         """
-        Encode using QP-based quality allocation with AV1's adaptive quantization.
+        Encode using QP-based quality allocation by PRE-DEGRADING pixels.
+        This FORCES the encoder to respect the QP map blueprint.
         
         Args:
             input_path: Path to input image
             output_path: Path to output AVIF file
-            qp_map: QP map array (H, W) with values 10-51
+            qp_map: QP map array (H, W) with values 0-51
             base_crf: Base CRF value (default: 30)
             
         Returns:
@@ -205,7 +206,7 @@ class AVIFEncoder:
         """
         import cv2
         
-        # Load image to get dimensions
+        # Load image
         img = cv2.imread(input_path)
         if img is None:
             print(f"  ✗ Could not load image: {input_path}")
@@ -218,49 +219,141 @@ class AVIFEncoder:
         max_qp = int(np.max(qp_map))
         median_qp = int(np.median(qp_map))
         
-        # Calculate percentage of high-quality regions
-        high_quality_pixels = np.sum(qp_map <= 20)
-        high_quality_percent = (high_quality_pixels / qp_map.size) * 100
+        # Calculate percentage of PERSON regions (QP <= 10 indicates person/critical)
+        person_pixels = np.sum(qp_map <= 10)
+        person_percent = (person_pixels / qp_map.size) * 100
+        
+        # Calculate background regions (QP >= 35 indicates non-important)
+        background_pixels = np.sum(qp_map >= 35)
+        background_percent = (background_pixels / qp_map.size) * 100
         
         print(f"  QP Map Stats: min={min_qp}, median={median_qp}, max={max_qp}")
-        print(f"  High-quality regions: {high_quality_percent:.1f}%")
+        print(f"  Person regions (QP≤10): {person_percent:.1f}%")
+        print(f"  Background regions (QP≥35): {background_percent:.1f}%")
         
-        # Strategy: Use QP statistics to determine CRF
-        # Lower CRF = better quality protection for important regions
-        if high_quality_percent > 20:
-            # Lots of important content - use low CRF
-            crf = 23
-            aq_mode = 1  # Variance-based AQ
-            aq_strength = 1.0
-            print(f"  Strategy: High important content - CRF={crf}, moderate AQ")
-        elif high_quality_percent > 5:
-            # Moderate important content
-            crf = 28
-            aq_mode = 1
-            aq_strength = 1.5
-            print(f"  Strategy: Moderate important content - CRF={crf}, strong AQ")
-        else:
-            # Small important regions - protect them specifically
-            crf = 20  # Very low CRF to protect important details
-            aq_mode = 2  # Complexity-based AQ
-            aq_strength = 2.0  # Very aggressive AQ to compress background
-            print(f"  Strategy: Small critical regions - CRF={crf}, aggressive AQ")
+        # ============================================================
+        # CRITICAL: PRE-DEGRADE IMAGE BASED ON QP MAP BLUEPRINT
+        # This ensures encoder MUST respect our quality allocation
+        # ============================================================
+        print(f"  [1/2] ⚠️  APPLYING QP MAP BLUEPRINT TO IMAGE PIXELS...")
+        degraded_img = self._apply_qp_map_to_pixels(img, qp_map)
         
-        # AV1-specific parameters for quality optimization
+        # Save degraded image to temporary file
+        temp_degraded = tempfile.mktemp(suffix='.png')
+        cv2.imwrite(temp_degraded, degraded_img)
+        
+        # ============================================================
+        # ENCODE THE ALREADY-DEGRADED IMAGE
+        # ============================================================
+        print(f"  [2/2] Encoding pre-degraded image to AVIF...")
+        
+        # Use moderate CRF since image is already degraded per QP map
+        crf = 23  # Medium CRF for already-degraded image
+        aq_mode = 1  # Variance-based AQ
+        aq_strength = 1.0  # Normal AQ (image already degraded)
+        
+        print(f"  Strategy: QP MAP ENFORCED VIA PIXEL DEGRADATION")
+        print(f"  ✓ Persons (QP 0-10): Pristine pixels preserved")
+        print(f"  ✗ Background (QP 35-51): Heavily degraded pixels")
+        
+        # AV1-specific parameters
         additional_params = {
-            'aq-mode': str(aq_mode),  # Adaptive quantization mode
-            'tune': 'ssim',  # Tune for perceptual quality
-            'enable-cdef': '1',  # Constrained directional enhancement filter
-            'enable-restoration': '1',  # Loop restoration filter
+            'aq-mode': str(aq_mode),
+            'tune': 'ssim',
+            'enable-cdef': '1',
+            'enable-restoration': '1',
         }
         
-        return self.encode_to_avif(
-            input_path=input_path,
+        # Encode the degraded image
+        success = self.encode_to_avif(
+            input_path=temp_degraded,
             output_path=output_path,
             crf=crf,
-            speed=4,  # Slower for better compression
+            speed=4,
             additional_params=additional_params
         )
+        
+        # Clean up temporary file
+        if os.path.exists(temp_degraded):
+            os.remove(temp_degraded)
+        
+        return success
+    
+    def _apply_qp_map_to_pixels(self, image: np.ndarray, qp_map: np.ndarray) -> np.ndarray:
+        """
+        Apply QP map directly to image pixels BEFORE encoding.
+        This FORCES the encoder to respect the QP map blueprint.
+        
+        QP zones:
+        - QP 0-10: Keep PRISTINE (persons)
+        - QP 11-20: Slight blur (3x3)
+        - QP 21-30: Moderate blur (7x7) + color reduction to 128 levels
+        - QP 31-40: Heavy blur (15x15) + color reduction to 64 levels
+        - QP 41-51: MAXIMUM blur (31x31) + color reduction to 32 levels (UNIDENTIFIABLE)
+        
+        Args:
+            image: Original image (H, W, 3)
+            qp_map: QP map (H, W) with values 0-51
+            
+        Returns:
+            Degraded image following QP map blueprint
+        """
+        import cv2
+        
+        h, w = image.shape[:2]
+        output = image.copy().astype(np.float32)
+        
+        print(f"      Applying QP-based pixel degradation:")
+        
+        # Zone 1: QP 0-10 (PRISTINE - persons)
+        mask_pristine = (qp_map <= 10).astype(np.uint8)
+        pristine_pct = np.sum(mask_pristine > 0) / (h * w) * 100
+        if pristine_pct > 0:
+            print(f"        QP 0-10:  {pristine_pct:5.1f}% → PRISTINE (no degradation)")
+        
+        # Zone 2: QP 11-20 (SLIGHT blur)
+        mask_slight = ((qp_map > 10) & (qp_map <= 20)).astype(np.uint8)
+        slight_pct = np.sum(mask_slight > 0) / (h * w) * 100
+        if slight_pct > 0:
+            print(f"        QP 11-20: {slight_pct:5.1f}% → Slight blur (3x3)")
+            blurred = cv2.GaussianBlur(output, (3, 3), 0)
+            mask_3ch = cv2.merge([mask_slight, mask_slight, mask_slight])
+            output = np.where(mask_3ch > 0, blurred, output)
+        
+        # Zone 3: QP 21-30 (MODERATE blur + color reduction)
+        mask_moderate = ((qp_map > 20) & (qp_map <= 30)).astype(np.uint8)
+        moderate_pct = np.sum(mask_moderate > 0) / (h * w) * 100
+        if moderate_pct > 0:
+            print(f"        QP 21-30: {moderate_pct:5.1f}% → Moderate blur (7x7) + 128 colors")
+            blurred = cv2.GaussianBlur(output, (7, 7), 0)
+            # Color quantization to 128 levels (7-bit)
+            quantized = (blurred // 2) * 2
+            mask_3ch = cv2.merge([mask_moderate, mask_moderate, mask_moderate])
+            output = np.where(mask_3ch > 0, quantized, output)
+        
+        # Zone 4: QP 31-40 (HEAVY blur + aggressive color reduction)
+        mask_heavy = ((qp_map > 30) & (qp_map <= 40)).astype(np.uint8)
+        heavy_pct = np.sum(mask_heavy > 0) / (h * w) * 100
+        if heavy_pct > 0:
+            print(f"        QP 31-40: {heavy_pct:5.1f}% → HEAVY blur (15x15) + 64 colors")
+            blurred = cv2.GaussianBlur(output, (15, 15), 0)
+            # Aggressive color quantization to 64 levels (6-bit)
+            quantized = (blurred // 4) * 4
+            mask_3ch = cv2.merge([mask_heavy, mask_heavy, mask_heavy])
+            output = np.where(mask_3ch > 0, quantized, output)
+        
+        # Zone 5: QP 41-51 (MAXIMUM blur + extreme color reduction - UNIDENTIFIABLE)
+        mask_max = (qp_map > 40).astype(np.uint8)
+        max_pct = np.sum(mask_max > 0) / (h * w) * 100
+        if max_pct > 0:
+            print(f"        QP 41-51: {max_pct:5.1f}% → MAXIMUM blur (31x31) + 32 colors (UNIDENTIFIABLE)")
+            blurred = cv2.GaussianBlur(output, (31, 31), 0)
+            # Extreme color quantization to 32 levels (5-bit)
+            quantized = (blurred // 8) * 8
+            mask_3ch = cv2.merge([mask_max, mask_max, mask_max])
+            output = np.where(mask_3ch > 0, quantized, output)
+        
+        return output.astype(np.uint8)
     
     def get_file_size(self, file_path: str) -> int:
         """Get file size in bytes."""
