@@ -1,10 +1,3 @@
-#!/usr/bin/env python3
-"""
-Show Available Intent Categories
-
-Utility script to display all 54 intent categories and optionally
-classify a test image to see which intent it matches.
-"""
 
 import sys
 import os
@@ -15,21 +8,17 @@ def main():
     print(" SAAC Intent Classification System")
     print("="*70)
     
-    # Check if CLIP is available
     try:
         from saac.detectors.scene_classifier import ClipSceneClassifier
         import cv2
         
         print("\n✓ CLIP classifier available")
         
-        # Load classifier
         print("\nLoading CLIP model...")
         classifier = ClipSceneClassifier(device='cpu')
         
-        # List all intents
         classifier.list_all_intents(show_descriptions=False)
         
-        # If image provided, classify it
         if len(sys.argv) > 1:
             image_path = sys.argv[1]
             
@@ -41,7 +30,6 @@ def main():
             print(f" Classifying Image: {os.path.basename(image_path)}")
             print("="*70)
             
-            # Load and classify image
             image = cv2.imread(image_path)
             if image is None:
                 print(f"\n❌ Error: Could not read image: {image_path}")
@@ -49,7 +37,6 @@ def main():
             
             print(f"\nImage size: {image.shape[1]}x{image.shape[0]}")
             
-            # Get top predictions
             print("\n🎯 Top 10 Intent Predictions:")
             print("-"*70)
             top_predictions = classifier.classify_top_k(image, k=10, min_confidence=0.01)
@@ -59,10 +46,9 @@ def main():
                 bar = "█" * bar_length
                 desc = classifier.get_scene_description(intent)
                 print(f"{i:2d}. {intent:20s} {bar} {confidence:6.2%}")
-                if i <= 3:  # Show description for top 3
+                if i <= 3:
                     print(f"    → {desc}")
             
-            # Get primary classification
             print("\n" + "="*70)
             primary, primary_conf, alternatives = classifier.classify_with_fallback_chain(image)
             print(f"✅ Selected Intent: {primary}")

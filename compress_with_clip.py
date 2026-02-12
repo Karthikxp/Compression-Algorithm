@@ -1,10 +1,3 @@
-#!/usr/bin/env python3
-"""
-SAAC Compression with CLIP Scene Classification
-
-Example script demonstrating CLIP-based scene understanding for
-superior compression intent detection.
-"""
 
 import sys
 import os
@@ -42,12 +35,11 @@ def main():
         sys.exit(1)
     
     base_name = os.path.splitext(os.path.basename(input_path))[0]
-    output_path = f"{base_name}_compressed.png"  # PNG output with pixel-level compression
+    output_path = f"{base_name}_compressed.avif"
     
     print(f"Compressing: {input_path}")
     print("="*70)
     
-    # Detect device
     try:
         import torch
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -61,7 +53,6 @@ def main():
     
     print()
     
-    # Check CLIP availability
     try:
         import clip
         print("✓ CLIP installed")
@@ -72,7 +63,6 @@ def main():
     
     print()
     
-    # Create compressor with CLIP scene classification
     print("Initializing SAAC with CLIP scene classifier...")
     print("-"*70)
     
@@ -81,14 +71,12 @@ def main():
         yolo_model='yolov8n-seg.pt',
         saliency_method='spectral',
         segmentation_method='simple',
-        scene_method='clip',  # ← Use CLIP for scene classification
+        scene_method='clip',
         enable_saliency=True,
         enable_segmentation=True,
-        blend_mode='priority',
-        compression_mode='pixel'  # Pixel-level compression for PNG output
+        blend_mode='priority'
     )
     
-    # Compress
     stats = compressor.compress_image(
         input_path=input_path,
         output_path=output_path,
@@ -96,7 +84,6 @@ def main():
         visualization_dir='visualizations'
     )
     
-    # Print summary
     print("\n" + "="*70)
     print("COMPRESSION SUMMARY (CLIP-Enhanced)")
     print("="*70)
@@ -107,14 +94,12 @@ def main():
     print(f"  Confidence:     {stats['scene_confidence']:.1%}")
     print(f"  Description:    {compressor.scene_classifier.get_scene_description(stats['scene'])}")
     
-    # If CLIP classifier is available, show probability distribution
     if hasattr(compressor.scene_classifier, 'classify_with_probabilities'):
         print(f"\n📊 Scene Probability Distribution:")
         import cv2
         image = cv2.imread(input_path)
         probs_dict = compressor.scene_classifier.get_scene_probabilities_dict(image)
         
-        # Show top 4 scenes
         sorted_probs = sorted(probs_dict.items(), key=lambda x: x[1], reverse=True)[:4]
         for scene, prob in sorted_probs:
             bar_length = int(prob * 30)
@@ -124,16 +109,9 @@ def main():
     print(f"\n📦 Compression Results:")
     print(f"  Objects found:  {stats['detections']}")
     print(f"  Original size:  {stats['original_size_mb']:.2f} MB")
-    
-    if stats.get('hevc_size_mb'):
-        print(f"  PNG output:     {stats['compressed_size_mb']:.2f} MB ({stats['compression_ratio']:.2f}x)")
-        print(f"  HEVC backup:    {stats['hevc_size_mb']:.2f} MB ({stats['hevc_compression_ratio']:.2f}x)")
-        print(f"  PNG savings:    {stats['space_saved_percent']:.1f}% (compressed pixels)")
-    else:
-        print(f"  Compressed:     {stats['compressed_size_mb']:.2f} MB")
-        print(f"  Ratio:          {stats['compression_ratio']:.2f}x")
-        print(f"  Space saved:    {stats['space_saved_percent']:.1f}%")
-    
+    print(f"  Compressed:     {stats['compressed_size_mb']:.2f} MB")
+    print(f"  Ratio:          {stats['compression_ratio']:.2f}x")
+    print(f"  Space saved:    {stats['space_saved_percent']:.1f}%")
     print(f"  Processing:     {stats['processing_time_seconds']:.1f}s")
     
     print(f"\n📈 Quality Allocation:")
